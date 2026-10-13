@@ -7,7 +7,7 @@ import { useOrganization } from "@/components/context/organizationContext";
 import { authFetch } from "@/lib/validation/authFetch";
 import { readStoredWorkspaceId } from "@/lib/workspaceStorage";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { ArrowLeft, FolderPlus } from "lucide-react";
 import ProjectScheduleBudgetFields, {
@@ -19,7 +19,7 @@ import {
   validateProjectScheduleBudget,
 } from "@/lib/projectScheduleBudget";
 
-export default function CreateProject() {
+function CreateProjectContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const { currentOrg } = useOrganization();
@@ -206,5 +206,17 @@ export default function CreateProject() {
         </div>
       </div>
     </PermissionGate>
+  );
+}
+
+export default function CreateProject() {
+  return (
+    <Suspense
+      fallback={
+        <div className="h-screen overflow-hidden bg-[#F6F9FC] dark:bg-slate-950" />
+      }
+    >
+      <CreateProjectContent />
+    </Suspense>
   );
 }

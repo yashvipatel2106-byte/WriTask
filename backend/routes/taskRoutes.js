@@ -84,5 +84,6 @@ router.delete(
   deleteSubtask
 );
 
+router.use("/:taskId/time-entries", require("./timeEntryRoutes"));
 
 module.exports = router;

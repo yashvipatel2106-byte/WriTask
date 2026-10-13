@@ -158,6 +158,231 @@ class PdfService {
       }
     }
   }
+
+  buildTableHtml({
+    title,
+    generatedAt,
+    columns,
+    rows,
+    workspaceName,
+    organizationName,
+    basedOnLabel,
+    createdBy,
+  }) {
+    const escape = (value) =>
+      String(value ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+    const logo = getLogoDataUri();
+    const orgLabel = organizationName || workspaceName || "Workspace";
+    const header = columns
+      .map(
+        (c) =>
+          `<th>${escape(c.label)}</th>`
+      )
+      .join("");
+    const body =
+      rows.length === 0
+        ? `<tr><td colspan="${columns.length}" class="empty">No data found for the selected filters.</td></tr>`
+        : rows
+            .map((row, index) => {
+              const isGroup = row.kind === "folder" || row.kind === "project";
+              const tds = columns
+                .map((c) => {
+                  const raw = row.cells?.[c.key] ?? "";
+                  const depth = Number(row.depth) || 0;
+                  const value =
+                    c.key === "title" && depth
+                      ? `${"  ".repeat(depth)}${raw}`
+                      : raw;
+                  const display = value || (isGroup && c.key !== "title" ? "" : "—");
+                  return `<td class="${c.key === "title" ? "title-cell" : ""}">${escape(display)}</td>`;
+                })
+                .join("");
+              return `<tr class="${isGroup ? "group-row" : index % 2 ? "alt" : ""}">${tds}</tr>`;
+            })
+            .join("");
+    return `<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>${escape(title)}</title>
+    <style>
+      * { box-sizing: border-box; }
+      html, body { margin: 0; padding: 0; }
+      body {
+        font-family: "Segoe UI", Arial, sans-serif;
+        color: #1e293b;
+        font-size: 12px;
+        line-height: 1.4;
+        padding: 16px;
+        background: #fff;
+      }
+      .page-frame {
+        border: 2px solid #06b6d4;
+        border-radius: 12px;
+        padding: 22px 24px 16px;
+        min-height: 100%;
+        box-shadow: inset 0 0 0 4px #ecfeff;
+      }
+      .header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        border-bottom: 3px solid #06b6d4;
+        padding-bottom: 16px;
+        margin-bottom: 18px;
+      }
+      .header-brand { display: flex; align-items: center; gap: 12px; }
+      .header-brand img { width: 44px; height: 44px; object-fit: contain; }
+      .header-brand .brand { font-size: 22px; font-weight: 800; color: #0f172a; letter-spacing: -0.01em; }
+      .header-brand .subtitle { font-size: 12px; color: #64748b; margin-top: 2px; }
+      .org-badge {
+        display: inline-block;
+        margin-top: 6px;
+        padding: 3px 10px;
+        background: #ecfeff;
+        color: #0e7490;
+        border: 1px solid #a5f3fc;
+        border-radius: 999px;
+        font-size: 10px;
+        font-weight: 700;
+        letter-spacing: 0.02em;
+        text-transform: uppercase;
+      }
+      .header-meta { text-align: right; font-size: 11px; color: #64748b; }
+      .header-meta .report-title {
+        font-size: 13px;
+        font-weight: 600;
+        color: #06b6d4;
+        margin-bottom: 3px;
+      }
+      .meta-row {
+        display: flex;
+        gap: 16px;
+        margin-bottom: 14px;
+        color: #64748b;
+        font-size: 11px;
+      }
+      .meta-row strong { color: #334155; font-weight: 600; }
+      table { width: 100%; border-collapse: collapse; }
+      thead th {
+        text-align: left;
+        font-size: 9px;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: #0e7490;
+        background: #ecfeff;
+        border-bottom: 1px solid #a5f3fc;
+        padding: 8px 10px;
+      }
+      tbody td {
+        padding: 8px 10px;
+        border-bottom: 1px solid #e2e8f0;
+        font-size: 11px;
+        color: #334155;
+      }
+      tbody tr.alt td { background: #f8fafc; }
+      tbody tr.group-row td {
+        background: #f0fdfa;
+        font-weight: 700;
+        color: #0f172a;
+      }
+      .title-cell { font-weight: 600; color: #0f172a; }
+      .empty { text-align: center; color: #94a3b8; padding: 20px 10px; }
+      .footer {
+        margin-top: 18px;
+        padding-top: 10px;
+        border-top: 1px solid #e2e8f0;
+        display: flex;
+        justify-content: space-between;
+        font-size: 10px;
+        color: #94a3b8;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="page-frame">
+      <div class="header">
+        <div class="header-brand">
+          ${logo ? `<img src="${logo}" alt="WriTask" />` : ""}
+          <div>
+            <div class="brand">WriTask</div>
+            <div class="subtitle">${escape(basedOnLabel || "Custom Report")}</div>
+            <div class="org-badge">${escape(orgLabel)}</div>
+          </div>
+        </div>
+        <div class="header-meta">
+          <div class="report-title">${escape(title)}</div>
+          <div>Generated ${escape(generatedAt)}</div>
+        </div>
+      </div>
+      <div class="meta-row">
+        <div>Workspace: <strong>${escape(workspaceName || "—")}</strong></div>
+        ${createdBy ? `<div>Prepared by: <strong>${escape(createdBy)}</strong></div>` : ""}
+        <div>Rows: <strong>${rows.filter((r) => r.kind !== "folder" && r.kind !== "project").length || rows.length}</strong></div>
+      </div>
+      <table>
+        <thead><tr>${header}</tr></thead>
+        <tbody>${body}</tbody>
+      </table>
+      <div class="footer">
+        <span>WriTask · ${escape(orgLabel)}</span>
+        <span>Confidential — for authorized members only</span>
+      </div>
+    </div>
+  </body>
+</html>`;
+  }
+
+  async generateTablePdf(
+    {
+      title,
+      columns,
+      rows,
+      workspaceName,
+      organizationName,
+      basedOnLabel,
+      createdBy,
+    },
+    browser = null
+  ) {
+    const html = this.buildTableHtml({
+      title,
+      generatedAt: dayjs().format("DD MMM YYYY hh:mm A"),
+      columns,
+      rows,
+      workspaceName,
+      organizationName,
+      basedOnLabel,
+      createdBy,
+    });
+    const ownsBrowser = !browser;
+    const activeBrowser = browser || (await this.launchBrowser());
+    try {
+      const page = await activeBrowser.newPage();
+      try {
+        await page.setContent(html, {
+          waitUntil: "networkidle0",
+          timeout: 60000,
+        });
+        return await page.pdf({
+          format: "A4",
+          landscape: columns.length > 6,
+          printBackground: true,
+          margin: { top: "16px", bottom: "16px", left: "16px", right: "16px" },
+        });
+      } finally {
+        await page.close().catch(() => {});
+      }
+    } finally {
+      if (ownsBrowser) {
+        await activeBrowser.close().catch(() => {});
+      }
+    }
+  }
 }
 
 module.exports = new PdfService();

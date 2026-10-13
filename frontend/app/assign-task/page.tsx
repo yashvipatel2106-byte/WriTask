@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { toast } from "@/components/ui/toast";
+import Select, { fieldSelectTriggerClass } from "@/components/ui/Select";
 
 export default function AssignTaskPage() {
   const [form, setForm] = useState({
@@ -59,37 +60,34 @@ export default function AssignTaskPage() {
                 Select Task
               </label>
 
-              <select
+              <Select
                 value={form.task}
-                onChange={(e) =>
+                onChange={(next) =>
                   setForm({
                     ...form,
-                    task: e.target.value,
+                    task: next,
                   })
                 }
-                className="w-full bg-slate-50 border border-slate-200 p-4 rounded-xl text-slate-900 dark:bg-slate-800 dark:border-slate-700 dark:text-slate-100"
-              >
-                <option value="">
-                  Select Task
-                </option>
-
-                <option>
-                  Dashboard UI Design
-                </option>
-
-                <option>
-                  Authentication Module
-                </option>
-
-                <option>
-                  Project Timeline Setup
-                </option>
-
-                <option>
-                  Team Management Module
-                </option>
-
-              </select>
+                placeholder="Select Task"
+                className="w-full"
+                triggerClassName={fieldSelectTriggerClass}
+                options={[
+                  { value: "", label: "Select Task" },
+                  { value: "Dashboard UI Design", label: "Dashboard UI Design" },
+                  {
+                    value: "Authentication Module",
+                    label: "Authentication Module",
+                  },
+                  {
+                    value: "Project Timeline Setup",
+                    label: "Project Timeline Setup",
+                  },
+                  {
+                    value: "Team Management Module",
+                    label: "Team Management Module",
+                  },
+                ]}
+              />
 
             </div>
 
@@ -101,37 +99,25 @@ export default function AssignTaskPage() {
                 Assign To
               </label>
 
-              <select
+              <Select
                 value={form.member}
-                onChange={(e) =>
+                onChange={(next) =>
                   setForm({
                     ...form,
-                    member: e.target.value,
+                    member: next,
                   })
                 }
-                className="w-full bg-slate-50 border border-slate-200 p-4 rounded-xl text-slate-900 dark:bg-slate-800 dark:border-slate-700 dark:text-slate-100"
-              >
-                <option value="">
-                  Select Team Member
-                </option>
-
-                <option>
-                  John Doe
-                </option>
-
-                <option>
-                  Jane Smith
-                </option>
-
-                <option>
-                  Alex Johnson
-                </option>
-
-                <option>
-                  Sarah Williams
-                </option>
-
-              </select>
+                placeholder="Select Team Member"
+                className="w-full"
+                triggerClassName={fieldSelectTriggerClass}
+                options={[
+                  { value: "", label: "Select Team Member" },
+                  { value: "John Doe", label: "John Doe" },
+                  { value: "Sarah Smith", label: "Sarah Smith" },
+                  { value: "Mike Johnson", label: "Mike Johnson" },
+                  { value: "Emily Davis", label: "Emily Davis" },
+                ]}
+              />
 
             </div>
 

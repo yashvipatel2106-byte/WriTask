@@ -1,11 +1,32 @@
 const Organization = require("../models/Organization");
 const { resolveMemberProjectPermissions, findOrgMember } = require("./roleDefinitions");
+const { ROLE_PERMISSIONS } = require("../config/role");
+
+/**
+ * Resolve the user's project role — members array, project.owner, or org owner
+ * for org-linked projects.
+ */
+async function resolveProjectAccessRole(project, userId) {
+  const id = userId.toString();
+
+  const fromMembers = project.getMemberRole(userId);
+  // getMemberRole already checks project.owner; short-circuit if not org-only edge case
+  if (fromMembers) return fromMembers;
+
+  if (project.organization) {
+    const organization = await Organization.findById(project.organization);
+    if (organization?.owner?.toString() === id) {
+      return "owner";
+    }
+  }
+
+  return null;
+}
 
 async function resolveEffectiveProjectPermissions(project, userId) {
-  const directRole = project.getMemberRole(userId);
+  const directRole = await resolveProjectAccessRole(project, userId);
   if (!directRole) return [];
 
-  const { ROLE_PERMISSIONS } = require("../config/role");
   const basePermissions = ROLE_PERMISSIONS[directRole] || [];
 
   // Project ownership is an explicit, non-overridable grant — the creator
@@ -62,16 +83,24 @@ function resolveMemberUserId(member) {
 }
 
 async function resolveProjectRoleForUser(project, userId) {
-  const directRole = project.getMemberRole(userId);
-  if (directRole) return directRole;
-  return null;
+  return resolveProjectAccessRole(project, userId);
 }
 
 async function buildProjectListFilter(
   userId,
-  { organizationId, personal, allOrgProjects } = {}
+  { organizationId, personal, allOrgProjects, workspaceId, trashOnly } = {}
 ) {
-  const base = { isDeleted: { $ne: true } };
+  const { getWorkspaceForUser, applyWorkspaceFilter } = require("./workspaces");
+  const base = trashOnly ? { isDeleted: true } : { isDeleted: { $ne: true } };
+
+  if (workspaceId) {
+    const ws = await getWorkspaceForUser(userId, workspaceId);
+    if (!ws) {
+      return {
+        error: { status: 400, message: "Invalid or inaccessible workspace" },
+      };
+    }
+  }
 
   if (organizationId) {
     const organization = await Organization.findById(organizationId);
@@ -99,22 +128,36 @@ async function buildProjectListFilter(
         };
       }
       return {
-        filter: { ...base, organization: organizationId },
+        filter: applyWorkspaceFilter(
+          { ...base, organization: organizationId },
+          workspaceId
+        ),
       };
     }
 
     return {
-      filter: { ...base, organization: organizationId, "members.user": userId },
+      filter: applyWorkspaceFilter(
+        { ...base, organization: organizationId, "members.user": userId },
+        workspaceId
+      ),
     };
   }
 
   if (personal === "true") {
     return {
-      filter: { ...base, organization: null, "members.user": userId },
+      filter: applyWorkspaceFilter(
+        { ...base, organization: null, "members.user": userId },
+        workspaceId
+      ),
     };
   }
 
-  return { filter: { ...base, "members.user": userId } };
+  return {
+    filter: applyWorkspaceFilter(
+      { ...base, "members.user": userId },
+      workspaceId
+    ),
+  };
 }
 
 function buildOrgProjectMembers(organization, creatorUserId) {
@@ -124,6 +167,7 @@ function buildOrgProjectMembers(organization, creatorUserId) {
 module.exports = {
   resolveMemberUserId,
   resolveProjectRoleForUser,
+  resolveProjectAccessRole,
   resolveEffectiveProjectPermissions,
   userHasProjectPermission,
   canDeleteTask,

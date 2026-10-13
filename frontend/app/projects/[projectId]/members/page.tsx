@@ -9,6 +9,7 @@ import { useOrgRoles } from "@/hooks/useOrgRoles";
 import { projectRoleToOrgRole } from "@/lib/rbac";
 import { toast } from "@/components/ui/toast";
 import { confirmDialog } from "@/components/ui/confirm";
+import { projectMatchesActiveWorkspace } from "@/lib/workspaceStorage";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
@@ -61,34 +62,52 @@ export default function MembersPage() {
     if (!projectId) return;
     setLoading(true);
 
-    const projectRes = await authFetch(`/projects/${projectId}`);
-    if (projectRes.status === 401 || projectRes.status === 403) {
-      router.push("/projects");
-      return;
-    }
-    if (projectRes.ok) {
-      const p = await projectRes.json();
-      setProjectName(p.title);
-      const orgId = p.organization?._id || p.organization || null;
-      setOrganizationId(orgId);
-    }
+    try {
+      const projectRes = await authFetch(`/projects/${projectId}`);
+      if (projectRes.status === 401 || projectRes.status === 403) {
+        router.push("/projects");
+        return;
+      }
+      if (projectRes.ok) {
+        const p = await projectRes.json();
+        const projectWorkspace = p.workspace ?? p.projectWorkspaceId ?? null;
+        if (!projectMatchesActiveWorkspace(projectWorkspace)) {
+          router.replace("/projects");
+          return;
+        }
+        setProjectName(p.title);
+        const orgId = p.organization?._id || p.organization || null;
+        setOrganizationId(orgId);
+      } else if (!projectRes.ok) {
+        router.push("/projects");
+        return;
+      }
 
-    const [membersRes, invitesRes] = await Promise.all([
-      authFetch(`/projects/${projectId}/members`),
-      authFetch(`/projects/${projectId}/invitations`),
-    ]);
-    if (membersRes.ok) {
-      const rows = await membersRes.json();
-      setMembers(
-        (Array.isArray(rows) ? rows : []).filter(
-          (m: Member) => m?.user && m.user._id
-        )
+      const [membersRes, invitesRes] = await Promise.all([
+        authFetch(`/projects/${projectId}/members`),
+        authFetch(`/projects/${projectId}/invitations`),
+      ]);
+      if (membersRes.ok) {
+        const rows = await membersRes.json();
+        setMembers(
+          (Array.isArray(rows) ? rows : []).filter(
+            (m: Member) => m?.user && m.user._id
+          )
+        );
+      } else if (membersRes.status === 401 || membersRes.status === 403) {
+        router.push("/projects");
+        return;
+      }
+      if (invitesRes.ok) setPendingInvites(await invitesRes.json());
+      else setPendingInvites([]);
+    } catch {
+      toast.error(
+        "Unable to reach the server. Make sure the backend is running."
       );
+      router.push("/projects");
+    } finally {
+      setLoading(false);
     }
-    if (invitesRes.ok) setPendingInvites(await invitesRes.json());
-    else setPendingInvites([]);
-
-    setLoading(false);
   }, [projectId, router]);
 
   useEffect(() => {

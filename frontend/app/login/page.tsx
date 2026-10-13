@@ -17,33 +17,38 @@ function LoginPageInner() {
   const searchParams = useSearchParams();
   useAllowPageScroll();
 
-  const [email, setEmail] = useState("");
+  // After setting a password from an invitation link, the accept page
+  // sends the invited email here so the person logs in with that exact
+  // account instead of retyping it.
+  const [userId, setUserId] = useState(() => searchParams.get("userId") || "");
   const [password, setPassword] = useState("");
   const [showPw, setShowPw] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
-  const handleSubmit = async (e: FormEvent) => {
+  const handleLogin = async (e: FormEvent) => {
     e.preventDefault();
     setError("");
+
+    if (!userId.trim() || !password) {
+      setError("Enter your username and password.");
+      return;
+    }
+
     setLoading(true);
     try {
       const res = await fetch(apiUrl("/auth/login"), {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ email, password }),
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          userId: userId.trim(),
+          password,
+        }),
       });
       const data = await res.json();
 
       if (!res.ok) {
-        setError(
-          data?.message ||
-            (res.status === 404
-              ? "Account not found. Please sign up first."
-              : "Invalid email or password.")
-        );
+        setError(data?.message || "Invalid user ID or password");
         return;
       }
 
@@ -52,43 +57,22 @@ function LoginPageInner() {
         return;
       }
 
-      localStorage.setItem("token", data.token);
-      const profile = data.user;
-      localStorage.setItem(
-        "user",
-        JSON.stringify({
-          ...profile,
-          hasPassword:
-            typeof profile.hasPassword === "boolean" ? profile.hasPassword : true,
-        })
-      );
-      if (data.organizationId) {
-        localStorage.setItem("organizationId", String(data.organizationId));
-      } else {
-        localStorage.removeItem("organizationId");
-      }
-
-      const pendingInvite = localStorage.getItem("pendingInviteToken");
-      const pendingProjectInvite = localStorage.getItem(
-        "pendingProjectInviteToken"
-      );
-      const nextParam = searchParams.get("next");
-      const safeNext =
-        nextParam && nextParam.startsWith("/") && !nextParam.startsWith("//")
-          ? nextParam
-          : null;
-
-      window.location.href = pendingProjectInvite
-        ? `/invitations/project?token=${pendingProjectInvite}`
-        : pendingInvite
-          ? `/invitations/accept?token=${pendingInvite}`
-          : safeNext || "/dashboard";
+      completeLoginRedirect({
+        token: data.token,
+        user: data.user,
+        organizationId: data.organizationId ?? null,
+        next: searchParams.get("next"),
+      });
     } catch {
       setError("Unable to sign in. Please try again.");
     } finally {
       setLoading(false);
     }
   };
+
+  const forgotHref = userId.trim().includes("@")
+    ? `/forgot-password?email=${encodeURIComponent(userId.trim())}`
+    : "/forgot-password";
 
   return (
     <>
@@ -108,28 +92,29 @@ function LoginPageInner() {
               <Logo className="auth-icon-logo" />
             </div>
             <h1>Welcome back</h1>
-            <p>Sign in to your account</p>
+            <p>Sign in with your organization password</p>
             <div className="rule" />
           </div>
 
           {error && <div className="alert alert-error">{error}</div>}
 
-          <form className="auth-form" onSubmit={handleSubmit} noValidate>
+          <form className="auth-form" onSubmit={handleLogin} noValidate>
             <div className="field has-lead-icon">
-              <label htmlFor="login-email">Email address</label>
+              <label htmlFor="login-userid">Username</label>
               <div className="field-control">
                 <span className="field-icon">
                   <MailIcon />
                 </span>
                 <input
-                  id="login-email"
-                  type="email"
-                  placeholder="you@example.com"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  autoComplete="email"
+                  id="login-userid"
+                  type="text"
+                  placeholder="Username or email"
+                  value={userId}
+                  onChange={(e) => setUserId(e.target.value)}
+                  autoComplete="username"
                   suppressHydrationWarning
                   required
+                  autoFocus
                 />
               </div>
             </div>
@@ -162,7 +147,7 @@ function LoginPageInner() {
             </div>
 
             <div className="aux-row">
-              <a href="/forgot-password">Forgot password?</a>
+              <a href={forgotHref}>Forgot password?</a>
             </div>
 
             <button
@@ -170,7 +155,7 @@ function LoginPageInner() {
               className={`btn-submit${loading ? " loading" : ""}`}
               disabled={loading}
             >
-              <span className="lbl ">Sign in</span>
+              <span className="lbl">Sign in</span>
               <span className="spin" />
             </button>
           </form>
@@ -178,9 +163,9 @@ function LoginPageInner() {
           <div className="or-divider">or</div>
           <GoogleSignInButton text="signin_with" />
 
-          <div className="auth-foot">
-            New here?&nbsp;<a href="/signup">Create an account</a>
-          </div>
+          <p className="auth-foot">
+            Don&apos;t have an account? <a href="/signup">Sign up</a>
+          </p>
         </div>
       </div>
     </>

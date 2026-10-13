@@ -5,6 +5,10 @@ const EVENTS = require("../socket/events");
 const { buildCreatedEntry, buildSubtaskAddedEntry } = require("../utils/taskActivity");
 const { notifyAssignment, notifySubtaskAssignment } = require("../utils/notificationService");
 const { syncTaskToCalendarSafe } = require("../utils/calendarTaskSync");
+const {
+  getTaskEditableCustomFieldDefinitions,
+  seedTaskCustomFieldValues,
+} = require("../utils/customFields");
 
 async function safeNotify(fn) {
   try {
@@ -43,7 +47,8 @@ async function createTaskService({
   if (!user?._id) throw new Error("Task creator is required.");
 
   const count = await Task.countDocuments({ project: project._id, status });
-  const task = await Task.create({
+  const definitions = await getTaskEditableCustomFieldDefinitions(project);
+  const taskPayload = {
     title: String(title).trim(),
     description,
     project: project._id,
@@ -61,7 +66,13 @@ async function createTaskService({
     status,
     order: count,
     activityLog: [buildCreatedEntry(user._id, String(title).trim())],
-  });
+  };
+  const task = await Task.create(taskPayload);
+  seedTaskCustomFieldValues(task, project, definitions);
+  if ((project.adoptedCustomFieldIds || []).length > 0) {
+    task.markModified("customFieldValues");
+    await task.save();
+  }
 
   const populated = await populateTaskList(Task.findById(task._id)).exec();
   if (!populated) throw new Error("Task created but could not be loaded.");

@@ -11,6 +11,9 @@ export const ORG_PERMISSION_ITEMS: PermissionItem[] = [
   { key: "org:manageMembers", label: "Manage members", group: "Members" },
   { key: "org:createProject", label: "Create", group: "Projects" },
   { key: "org:viewAdmin", label: "Access administration", group: "Administration" },
+  { key: "requestForm:submit", label: "Submit requests", group: "Request Forms" },
+  { key: "requestForm:manage", label: "Manage forms", group: "Request Forms" },
+  { key: "requestForm:review", label: "Review requests", group: "Request Forms" },
 ];
 
 export const PROJECT_PERMISSION_ITEMS: PermissionItem[] = [
@@ -29,6 +32,16 @@ export const PROJECT_PERMISSION_ITEMS: PermissionItem[] = [
   { key: "task:assign", label: "Assign", group: "Tasks" },
   { key: "status:add", label: "Add", group: "Statuses" },
   { key: "status:delete", label: "Delete", group: "Statuses" },
+    // Gantt
+  { key: "gantt:read", label: "View Gantt", group: "Gantt"},
+  { key: "gantt:editSchedule", label: "Edit schedule", group: "Gantt" },
+  { key: "gantt:manageDependencies", label: "Manage dependencies", group: "Gantt" },
+  { key: "gantt:manageMilestones", label: "Manage milestones", group: "Gantt" },
+  { key: "gantt:viewCriticalPath", label: "View critical path", group: "Gantt" },
+  { key: "gantt:viewConflicts", label: "View conflicts", group: "Gantt" },
+  { key: "gantt:resolveConflicts", label: "Resolve conflicts", group: "Gantt" },
+  { key: "gantt:viewBaseline", label: "View baseline", group: "Gantt"},
+  { key: "gantt:manageBaseline", label: "Manage baseline", group: "Gantt" },
 ];
 
 export function togglePermission(list: string[], key: string, enabled: boolean) {

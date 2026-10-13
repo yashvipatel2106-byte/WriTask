@@ -4,6 +4,7 @@ export function isPublicAuthPath(pathname: string) {
     pathname === "/login" ||
     pathname === "/signup" ||
     pathname === "/forgot-password" ||
+    pathname.startsWith("/reset-password") ||
     pathname.startsWith("/verify-otp")
   );
 }

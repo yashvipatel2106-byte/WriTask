@@ -5,7 +5,22 @@ const {
   resolveEffectiveProjectPermissions,
   userHasProjectPermission,
   canDeleteTask,
+  resolveMemberUserId,
 } = require("../utils/projectAccess");
+
+async function ensureProjectOwnerMembership(project) {
+  const ownerId = project.owner?._id || project.owner;
+  if (!ownerId) return;
+
+  const ownerStr = ownerId.toString();
+  const hasOwner = (project.members || []).some(
+    (member) => resolveMemberUserId(member) === ownerStr
+  );
+  if (hasOwner) return;
+
+  project.members.push({ user: ownerId, role: "owner" });
+  await project.save();
+}
 
 /**
  * requireProjectRole(permission)
@@ -35,6 +50,8 @@ const requireProjectRole = (permission) => {
       if (project.isDeleted) {
         return res.status(404).json({ message: "Project not found or is in trash" });
       }
+
+      await ensureProjectOwnerMembership(project);
 
       const userId = req.user._id.toString();
       const userRole = await resolveProjectRoleForUser(project, userId);
@@ -101,6 +118,8 @@ const requireTaskPermission = (permission) => {
       if (!project) {
         return res.status(404).json({ message: "Project not found" });
       }
+
+      await ensureProjectOwnerMembership(project);
 
       const userId = req.user._id.toString();
       const userRole = await resolveProjectRoleForUser(project, userId);

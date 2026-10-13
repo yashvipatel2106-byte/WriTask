@@ -8,6 +8,7 @@ import {
   useMemo,
   type ReactNode,
 } from "react";
+import { usePathname } from "next/navigation";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import {
   fetchOrgAccess,
@@ -21,6 +22,7 @@ import {
   selectOrgReady,
   selectPersonalWorkspace,
 } from "@/store/selectors/orgSelectors";
+import { isPublicAuthPath } from "@/lib/publicRoutes";
 
 export type { OrgSummary, OrgAccessData } from "@/store/types/org";
 
@@ -41,6 +43,7 @@ const OrganizationContext = createContext<OrganizationContextValue | null>(null)
 
 export function OrganizationProvider({ children }: { children: ReactNode }) {
   const dispatch = useAppDispatch();
+  const pathname = usePathname();
   const loading = useAppSelector(selectOrgLoading);
   const orgReady = useAppSelector(selectOrgReady);
   const access = useAppSelector(selectOrgAccess);
@@ -54,8 +57,9 @@ export function OrganizationProvider({ children }: { children: ReactNode }) {
   }, [dispatch]);
 
   useEffect(() => {
+    if (isPublicAuthPath(pathname)) return;
     void refreshAccess();
-  }, [refreshAccess]);
+  }, [refreshAccess, pathname]);
 
   const setCurrentOrgId = useCallback(
     (orgId: string | null) => {
@@ -66,11 +70,13 @@ export function OrganizationProvider({ children }: { children: ReactNode }) {
 
   const can = useCallback(
     (permission: string) => {
-      if (!access?.hasOrgMembership && access?.personalWorkspace) {
-        return true;
-      }
+      // Personal Workspace (no active org): allow core personal actions.
+      // Organization permissions only apply inside an Organization Workspace.
       if (!currentOrg) {
-        return false;
+        if (!access?.hasOrgMembership) return true;
+        // Personal mode while belonging to orgs: only personal project creation
+        // is granted here; org-admin features require switching into an org.
+        return permission === "org:createProject";
       }
       if (currentOrg.orgPermissions?.length) {
         return currentOrg.orgPermissions.includes(permission);

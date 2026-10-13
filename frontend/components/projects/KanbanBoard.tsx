@@ -3,7 +3,7 @@
 import dynamic from "next/dynamic";
 import { useSocket } from "@/components/context/SocketProvider";
 import { EVENTS } from "@/services/socket/events";
-import { useRef, useState, useEffect, type MouseEvent as ReactMouseEvent } from "react";
+import { useRef, useState, useEffect, useMemo, type MouseEvent as ReactMouseEvent } from "react";
 
 import { authFetch } from "@/lib/validation/authFetch";
 import { apiUrl } from "@/lib/validation/api";
@@ -14,10 +14,24 @@ import {
   slugifyStatusLabel,
   type CustomStatus,
 } from "@/lib/taskStatuses";
-import { Plus, GripVertical, Trash2, Calendar, Paperclip, ListChecks, Flag, Tag as TagIcon, User, X } from "lucide-react";
+import { Plus, GripVertical, Trash2, ListChecks, X, LayoutGrid } from "lucide-react";
 import { avatarBg, avatarInitials } from "@/lib/avatarColor";
-import { PRIORITY_CHIP } from "@/lib/constants/taskPriority";
 import type { TaskTab } from "./TaskDetailDialog";
+import { formatCardMetaScheduleDisplay } from "@/lib/taskDisplayFormat";
+import type { TaskCustomFieldValue } from "@/lib/customFieldValues";
+import {
+  normalizeCardPreviewConfig,
+  filterCardPreviewListFields,
+  resolveVisibleCardFields,
+  type CardPreviewConfig,
+  type ProjectCustomField,
+} from "@/lib/kanbanCardPreview";
+import {
+  KanbanCustomCardField,
+  KanbanDefaultCardField,
+  AssigneeAvatars,
+} from "./KanbanTaskCardFields";
+import KanbanCardPreviewSettings from "./KanbanCardPreviewSettings";
 
 const TaskDetailDialog = dynamic(() => import("./TaskDetailDialog"), {
   ssr: false,
@@ -61,8 +75,25 @@ export type TaskItem = {
   subtasks?: Subtask[];
   assignee?: { _id: string; username: string; email: string; avatarColor?: string } | null;
   assignees?: Array<{ _id: string; username: string; email?: string; avatarColor?: string }>;
-  createdBy?: { username: string };
+  createdBy?: { _id?: string; username?: string; avatarColor?: string };
   updatedAt?: string;
+  effortHours?: number | null;
+  durationHours?: number | null;
+  workingDayCount?: number | null;
+  customFieldValues?: TaskCustomFieldValue[];
+  dependencies?: Array<{
+    taskId:
+      | string
+      | {
+          _id: string;
+          title?: string;
+          startDate?: string | null;
+          dueDate?: string | null;
+          status?: string;
+        };
+    type?: "FS" | "SS" | "FF" | "SF";
+    lagDays?: number;
+  }>;
 };
 
 /** First image attachment's thumbnail on a task card. Attachments are served
@@ -128,10 +159,17 @@ type Props = {
   canAddStatus?: boolean;
   canDeleteStatus?: boolean;
   onCustomStatusesChange?: (statuses: CustomStatus[]) => void;
+  cardPreviewConfig?: CardPreviewConfig;
+  customFields?: ProjectCustomField[];
+  otherCustomFields?: ProjectCustomField[];
+  projectWorkspaceId?: string | null;
+  organizationId?: string | null;
+  adoptedCustomFieldIds?: string[];
+  onCustomFieldCreated?: (field: ProjectCustomField) => void;
+  onCardPreviewConfigChange?: (config: CardPreviewConfig) => void;
   initialTaskId?: string | null;
   initialSubtaskId?: string | null;
-  /** Tab to land on when initialTaskId opens the dialog — e.g. "activity" from a mention/comment notification. */
-  initialTaskTab?: TaskTab | null;
+  initialTaskTab?: TaskTab | null;  
   onTaskUrlChange?: (taskId: string | null, subtaskId?: string | null) => void;
   onTasksChange: (tasks: TaskItem[]) => void;
 };
@@ -145,6 +183,14 @@ export default function KanbanBoard({
   canAddStatus = false,
   canDeleteStatus = false,
   onCustomStatusesChange,
+ cardPreviewConfig,
+customFields = [],
+otherCustomFields = [],
+projectWorkspaceId = null,
+organizationId = null,
+adoptedCustomFieldIds = [],
+onCustomFieldCreated,
+onCardPreviewConfigChange,
   initialTaskId = null,
   initialSubtaskId = null,
   initialTaskTab = null,
@@ -187,6 +233,17 @@ export default function KanbanBoard({
     left: number;
   } | null>(null);
   const subtaskPreviewRef = useRef<HTMLDivElement>(null);
+  const [showCardPreviewSettings, setShowCardPreviewSettings] = useState(false);
+
+  const resolvedPreviewConfig = normalizeCardPreviewConfig(cardPreviewConfig);
+  const allCustomFields = useMemo(
+    () => [...customFields, ...otherCustomFields],
+    [customFields, otherCustomFields]
+  );
+  const visiblePreview = resolveVisibleCardFields(
+    resolvedPreviewConfig,
+    allCustomFields
+  );
 
   useEffect(() => {
     tasksRef.current = tasks;
@@ -712,9 +769,31 @@ useEffect(() => {
                 ? [task.assignee]
                 : [];
             const isSelected = selectedTask?._id === task._id;
-            const imageAttachment = task.attachments?.find((a) =>
-              a.mimeType?.startsWith("image/")
-            );
+            const imageAttachment =
+              visiblePreview.defaultFields.includes("attachments") &&
+              task.attachments?.find((a) => a.mimeType?.startsWith("image/"));
+            const visibleDefaultFields = visiblePreview.allFieldsOff
+              ? []
+              : filterCardPreviewListFields(visiblePreview.defaultFields);
+            const scheduleMetaText = visiblePreview.allFieldsOff
+              ? null
+              : formatCardMetaScheduleDisplay(
+                  task.startDate,
+                  task.dueDate,
+                  task.workingDayCount,
+                  task.durationHours,
+                  {
+                    showSchedule: resolvedPreviewConfig.defaultFields.schedule,
+                    showDuration: resolvedPreviewConfig.defaultFields.duration,
+                  }
+                );
+            const showMetaRow =
+              assignees.length > 0 || Boolean(scheduleMetaText);
+            const hasFieldRows =
+              visibleDefaultFields.length > 0 ||
+              visiblePreview.customFields.length > 0;
+            const hasSubtasks = (task.subtasks?.length ?? 0) > 0;
+            const showFooterRow = hasSubtasks;
 
             return (
             <div
@@ -759,109 +838,83 @@ useEffect(() => {
                       attachment={imageAttachment}
                     />
                   )}
-                  <div className="flex items-center justify-between gap-1.5 mb-1.5">
-                    <span
-                      className={`inline-flex items-center gap-1 text-[10px] uppercase tracking-wide font-semibold px-1.5 py-0.5 rounded ${
-                        PRIORITY_CHIP[task.priority] || "text-slate-600 bg-slate-100 dark:text-slate-300 dark:bg-slate-800"
-                      }`}
-                    >
-                      <Flag size={9} />
-                      {task.priority}
-                    </span>
+
+                  <div className="flex items-start justify-between gap-2">
+                    <p className="font-medium text-sm text-slate-800 leading-snug dark:text-slate-100 min-w-0">
+                      {task.title}
+                    </p>
                     {canEdit && (
                       <button
                         type="button"
                         onClick={(e) => deleteTaskFromCard(task, e)}
                         disabled={deletingTaskId === task._id}
                         title="Move to trash"
-                        className="p-1 rounded-md text-slate-400 opacity-0 group-hover:opacity-100 hover:bg-red-50 hover:text-red-500 transition-colors disabled:opacity-50 dark:text-slate-500 dark:hover:bg-red-500/10 dark:hover:text-red-400"
+                        className="p-1 rounded-md text-slate-400 opacity-0 group-hover:opacity-100 hover:bg-red-50 hover:text-red-500 transition-colors disabled:opacity-50 shrink-0 dark:text-slate-500 dark:hover:bg-red-500/10 dark:hover:text-red-400"
                       >
                         <Trash2 size={12} />
                       </button>
                     )}
                   </div>
 
-                  <p className="font-medium text-sm text-slate-800 leading-snug dark:text-slate-100">
-                    {task.title}
-                  </p>
-
-                  {task.tags && task.tags.length > 0 && (
-                    <div className="flex flex-wrap gap-1 mt-2">
-                      {task.tags.slice(0, 3).map((tag) => (
-                        <span
-                          key={tag}
-                          className="inline-flex items-center gap-1 text-[10px] text-slate-500 bg-slate-100 px-1.5 py-0.5 rounded-md dark:text-slate-400 dark:bg-slate-800"
-                        >
-                          <TagIcon size={9} />
-                          {tag}
+                  {showMetaRow && (
+                    <div className="flex items-center justify-between gap-2 mt-2">
+                      <div className="shrink-0">
+                        {assignees.length > 0 && (
+                          <AssigneeAvatars assignees={assignees} />
+                        )}
+                      </div>
+                      {scheduleMetaText && (
+                        <span className="text-[11px] text-slate-500 text-right shrink-0 dark:text-slate-400">
+                          {scheduleMetaText}
                         </span>
-                      ))}
-                      {task.tags.length > 3 && (
-                        <span className="text-[10px] text-slate-400 dark:text-slate-500">+{task.tags.length - 3}</span>
                       )}
                     </div>
                   )}
 
-                  <div className="flex flex-wrap items-center justify-between mt-2.5 gap-2">
-                    <div className="flex flex-wrap items-center gap-2.5 text-[10px] text-slate-400 min-w-0 dark:text-slate-500">
-                      {task.dueDate && (
-                        <span className="inline-flex items-center gap-1 shrink-0">
-                          <Calendar size={11} />
-                          {new Date(task.dueDate).toLocaleDateString(undefined, { month: "short", day: "numeric" })}
-                        </span>
-                      )}
-                      {(task.attachments?.length ?? 0) > 0 && (
-                        <span className="inline-flex items-center gap-1 shrink-0">
-                          <Paperclip size={11} />
-                          {task.attachments!.length}
-                        </span>
-                      )}
-                      {(task.subtasks?.length ?? 0) > 0 && (
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            const rect = e.currentTarget.getBoundingClientRect();
-                            setSubtaskPreview((prev) =>
-                              prev?.taskId === task._id
-                                ? null
-                                : { taskId: task._id, top: rect.bottom + 6, left: rect.left }
-                            );
-                          }}
-                          className="inline-flex items-center gap-1 shrink-0 rounded px-1 -mx-1 hover:bg-slate-200/70 hover:text-cyan-700 transition-colors dark:hover:bg-slate-700 dark:hover:text-cyan-400"
-                          title="View subtasks"
-                        >
-                          <ListChecks size={11} />
-                          {task.subtasks!.filter((s) => s.completed).length}/{task.subtasks!.length}
-                        </button>
-                      )}
+                  {hasFieldRows && (
+                    <div className="mt-2.5 space-y-0.5">
+                      {visibleDefaultFields.map((fieldId) => (
+                        <KanbanDefaultCardField
+                          key={fieldId}
+                          task={task}
+                          fieldId={fieldId}
+                          customStatuses={customStatuses}
+                        />
+                      ))}
+                      {visiblePreview.customFields.map((field) => (
+                        <KanbanCustomCardField
+                          key={field.id}
+                          task={task}
+                          field={field}
+                        />
+                      ))}
                     </div>
+                  )}
 
-                    {assignees.length > 0 && (
-                      <div className="flex items-center -space-x-1.5 shrink-0" title={assignees.map((a) => a.username).join(", ")}>
-                        {assignees.slice(0, 3).map((a) => (
-                          <div
-                            key={a._id}
-                            className={`w-5 h-5 rounded-full ${avatarBg(a.avatarColor, a._id || a.username).className} ring-2 ring-white flex items-center justify-center text-[9px] font-semibold text-white dark:ring-slate-800`}
-                            style={avatarBg(a.avatarColor, a._id || a.username).style}
+                  {showFooterRow && (
+                    <div className="flex flex-wrap items-center justify-between mt-2.5 gap-2">
+                      <div className="flex flex-wrap items-center gap-2.5 text-[10px] text-slate-400 min-w-0 dark:text-slate-500">
+                        {hasSubtasks && (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              const rect = e.currentTarget.getBoundingClientRect();
+                              setSubtaskPreview((prev) =>
+                                prev?.taskId === task._id
+                                  ? null
+                                  : { taskId: task._id, top: rect.bottom + 6, left: rect.left }
+                              );
+                            }}
+                            className="inline-flex items-center gap-1 shrink-0 rounded px-1 -mx-1 hover:bg-slate-200/70 hover:text-cyan-700 transition-colors dark:hover:bg-slate-700 dark:hover:text-cyan-400"
+                            title="View subtasks"
                           >
-                            {avatarInitials(a.username)}
-                          </div>
-                        ))}
-                        {assignees.length > 3 && (
-                          <div className="w-5 h-5 rounded-full bg-slate-200 ring-2 ring-white flex items-center justify-center text-[9px] font-semibold text-slate-600 dark:bg-slate-700 dark:ring-slate-800 dark:text-slate-300">
-                            +{assignees.length - 3}
-                          </div>
+                            <ListChecks size={11} />
+                            {task.subtasks!.filter((s) => s.completed).length}/{task.subtasks!.length}
+                          </button>
                         )}
                       </div>
-                    )}
-                  </div>
-
-                  {task.createdBy?.username && (
-                    <p className="flex items-center gap-1 text-[10px] text-slate-400 mt-1.5 truncate dark:text-slate-500">
-                      <User size={11} className="shrink-0" />
-                      Created by <span className="font-medium text-slate-500 dark:text-slate-400">{task.createdBy.username}</span>
-                    </p>
+                    </div>
                   )}
                 </div>
               </div>
@@ -875,6 +928,31 @@ useEffect(() => {
 
   return (
     <>
+      <div className="flex justify-end mb-3">
+        <button
+          type="button"
+          onClick={() => setShowCardPreviewSettings(true)}
+          className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-slate-200 bg-white text-sm font-medium text-slate-700 hover:border-cyan-300 hover:text-cyan-700 transition-colors dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:border-cyan-500 dark:hover:text-cyan-400"
+        >
+          <LayoutGrid size={16} />
+          Card preview fields
+        </button>
+      </div>
+
+      {showCardPreviewSettings && (
+        <KanbanCardPreviewSettings
+  projectId={projectId}
+  config={resolvedPreviewConfig}
+  customFields={customFields}
+  otherCustomFields={otherCustomFields}
+  projectWorkspaceId={projectWorkspaceId}
+  organizationId={organizationId}
+  onClose={() => setShowCardPreviewSettings(false)}
+  onSaved={(config) => onCardPreviewConfigChange?.(config)}
+  onCustomFieldCreated={onCustomFieldCreated}
+/>
+      )}
+
       {statusError && !addingStatus && (
         <p className="text-xs text-red-500 mb-3 dark:text-red-400">{statusError}</p>
       )}
@@ -1026,17 +1104,18 @@ useEffect(() => {
 
       {selectedTask && (
         <TaskDetailDialog
-          // Remount when the task identity changes so `initialTab` (and all the
-          // dialog's other task-seeded state) is freshly re-applied instead of
-          // carrying over stale state from whichever task was open before —
-          // otherwise a notification link to a different task while one is
-          // already open would swap the content in place but stay on whatever
-          // tab was active, ignoring the requested "activity" tab.
           key={selectedTask._id}
           task={selectedTask}
           projectId={projectId}
+          customFields={customFields}
+          otherCustomFields={otherCustomFields}
+          cardPreviewConfig={resolvedPreviewConfig}
+          adoptedCustomFieldIds={adoptedCustomFieldIds}
+          isPersonalProject={!organizationId}
           canEdit={canEdit}
           statusOptions={statusOptions}
+          organizationId={organizationId}
+          onCustomFieldCreated={onCustomFieldCreated}
           activeSubtaskId={activeSubtaskId}
           onSubtaskOpen={openSubtask}
           onNavigateParent={navigateToParent}

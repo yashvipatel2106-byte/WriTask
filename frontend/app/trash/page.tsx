@@ -7,7 +7,8 @@ import { useOrganization } from "@/components/context/organizationContext";
 import Navbar from "@/components/navbar/Navbar";
 import Sidebar from "@/components/sidebar/sidebar";
 import { authFetch } from "@/lib/validation/authFetch";
-import { RotateCcw, Trash2, FolderKanban, ClipboardList, Eye } from "lucide-react";
+import { buildScopeQuery } from "@/lib/workspaceStorage";
+import { RotateCcw, Trash2, FolderKanban, ClipboardList, Eye, Folder } from "lucide-react";
 import { confirmDialog } from "@/components/ui/confirm";
 import { toast } from "@/components/ui/toast";
 import type { TaskItem } from "@/components/projects/KanbanBoard";
@@ -32,12 +33,15 @@ type TrashTask = {
   priority?: string;
 };
 
-type TrashOrganization = {
+type TrashFolder = {
   _id: string;
   name: string;
   deletedAt?: string;
-  slug?: string;
+  parentFolder?: { _id?: string; name?: string; isDeleted?: boolean } | null;
+  parentProject?: { _id?: string; title?: string; isDeleted?: boolean } | null;
 };
+
+type Tab = "projects" | "tasks" | "subtasks" | "folders";
 
 type TrashSubtask = {
   _id: string;
@@ -65,8 +69,6 @@ type TrashSubtask = {
   task: { _id: string; title: string; isDeleted?: boolean; project?: string };
 };
 
-type Tab = "projects" | "tasks" | "organizations" | "subtasks";
-
 function formatDeletedAt(value?: string) {
   if (!value) return "Unknown date";
   return new Date(value).toLocaleString();
@@ -79,7 +81,7 @@ export default function TrashPage() {
   const [loading, setLoading] = useState(true);
   const [projects, setProjects] = useState<TrashProject[]>([]);
   const [tasks, setTasks] = useState<TrashTask[]>([]);
-  const [organizations, setOrganizations] = useState<TrashOrganization[]>([]);
+  const [folders, setFolders] = useState<TrashFolder[]>([]);
   const [subtasks, setSubtasks] = useState<TrashSubtask[]>([]);
   const [actionId, setActionId] = useState<string | null>(null);
   // Full task record for the read-only TaskDetailDialog opened via "Open" —
@@ -251,20 +253,18 @@ export default function TrashPage() {
 
   const loadTrash = useCallback(async () => {
     setLoading(true);
-    const scope = currentOrgId
-      ? `?organizationId=${encodeURIComponent(currentOrgId)}`
-      : "?personal=true";
+    const scope = buildScopeQuery(currentOrgId);
     const res = await authFetch(`/trash${scope}`);
     if (res.ok) {
       const data = await res.json();
       setProjects(data.projects || []);
       setTasks(data.tasks || []);
-      setOrganizations(data.organizations || []);
+      setFolders(data.folders || []);
       setSubtasks(data.subtasks || []);
     } else {
       setProjects([]);
       setTasks([]);
-      setOrganizations([]);
+      setFolders([]);
       setSubtasks([]);
     }
     setLoading(false);
@@ -280,9 +280,11 @@ export default function TrashPage() {
 
     setProjects([]);
     setTasks([]);
-    setOrganizations([]);
+    setFolders([]);
     setSubtasks([]);
     loadTrash();
+    window.addEventListener("workspace-changed", loadTrash);
+    return () => window.removeEventListener("workspace-changed", loadTrash);
   }, [router, loadTrash, orgReady]);
 
   useEffect(() => {
@@ -308,10 +310,7 @@ export default function TrashPage() {
       ?.scrollIntoView({ behavior: "smooth", block: "center" });
   }, [highlightTaskId, tab, tasks]);
 
-  const restore = async (type: "tasks" | "projects" | "organizations", id: string) => {
-    // Check the immediate parent locally first, so the user gets a clear
-    // "restore the parent first" message instead of a generic failed
-    // request — the backend enforces the same rule as a fallback.
+  const restore = async (type: "tasks" | "projects" | "folders", id: string) => {
     if (type === "tasks") {
       const task = tasks.find((t) => t._id === id);
       if (task?.project?.isDeleted) {
@@ -323,12 +322,20 @@ export default function TrashPage() {
         return;
       }
     }
-    if (type === "projects") {
-      const project = projects.find((p) => p._id === id);
-      if (project?.organization?.isDeleted) {
+    if (type === "folders") {
+      const folder = folders.find((f) => f._id === id);
+      if (folder?.parentFolder?.isDeleted) {
         await confirmDialog({
-          title: "Parent organization is still in trash",
-          description: `"${project.organization.name || "This organization"}" has been deleted. Restore the organization first, then you'll be able to restore this project.`,
+          title: "Parent folder is still in trash",
+          description: `"${folder.parentFolder.name || "The parent folder"}" has been deleted. Restore the parent folder first.`,
+          confirmLabel: "OK",
+        });
+        return;
+      }
+      if (folder?.parentProject?.isDeleted) {
+        await confirmDialog({
+          title: "Parent project is still in trash",
+          description: `"${folder.parentProject.title || "The parent project"}" has been deleted. Restore the parent project first.`,
           confirmLabel: "OK",
         });
         return;
@@ -344,14 +351,16 @@ export default function TrashPage() {
     if (res.ok) {
       toast.success(data.message || "Restored.");
       loadTrash();
-      if (type === "projects") window.dispatchEvent(new Event("projects-updated"));
+      if (type === "projects" || type === "folders") {
+        window.dispatchEvent(new Event("projects-updated"));
+      }
     } else {
       toast.error(data.message || "Failed to restore.");
     }
   };
 
   const permanentDelete = async (
-    type: "tasks" | "projects" | "organizations",
+    type: "tasks" | "projects" | "folders",
     id: string,
     name: string
   ) => {
@@ -372,7 +381,9 @@ export default function TrashPage() {
     if (res.ok) {
       toast.success(data.message || "Permanently deleted.");
       loadTrash();
-      if (type === "projects") window.dispatchEvent(new Event("projects-updated"));
+      if (type === "projects" || type === "folders") {
+        window.dispatchEvent(new Event("projects-updated"));
+      }
     } else {
       toast.error(data.message || "Failed to delete.");
     }
@@ -459,11 +470,8 @@ export default function TrashPage() {
             <button onClick={() => setTab("projects")} className={tabClass("projects")}>
               Projects ({projects.length})
             </button>
-            <button
-              onClick={() => setTab("organizations")}
-              className={tabClass("organizations")}
-            >
-              Organizations ({organizations.length})
+            <button onClick={() => setTab("folders")} className={tabClass("folders")}>
+              Folders ({folders.length})
             </button>
           </div>
 
@@ -486,13 +494,6 @@ export default function TrashPage() {
                       }`}
                     >
                       <div>
-                        {project.organization?.isDeleted && (
-                          <div className="mb-1">
-                            <span className="inline-flex items-center gap-1 text-xs font-medium text-amber-600 dark:text-amber-400">
-                              Parent organization &quot;{project.organization.name}&quot; is also in trash
-                            </span>
-                          </div>
-                        )}
                         <h3 className="font-semibold text-slate-900 dark:text-slate-100">{project.title}</h3>
                         <p className="text-sm text-slate-500 mt-1 dark:text-slate-400">
                           {project.organization?.name || "Personal workspace"}
@@ -689,43 +690,65 @@ export default function TrashPage() {
                   ))}
                 </div>
               )
-            ) : organizations.length === 0 ? (
-              <p className="text-slate-400 text-center py-12 dark:text-slate-500">No deleted organizations</p>
-            ) : (
-              <div className="space-y-3">
-                {organizations.map((org) => (
-                  <div key={org._id} className={itemClass}>
-                    <div>
-                      <h3 className="font-semibold text-slate-900 dark:text-slate-100">{org.name}</h3>
-                      <p className="text-sm text-slate-500 mt-1 dark:text-slate-400">{org.slug}</p>
-                      <p className="text-xs text-slate-400 mt-1 dark:text-slate-500">
-                        Deleted {formatDeletedAt(org.deletedAt)}
-                      </p>
+            ) : tab === "folders" ? (
+              folders.length === 0 ? (
+                <p className="text-slate-400 text-center py-12 dark:text-slate-500">
+                  No deleted folders
+                </p>
+              ) : (
+                <div className="space-y-3">
+                  {folders.map((folder) => (
+                    <div key={folder._id} className={itemClass}>
+                      <div>
+                        {folder.parentFolder?.isDeleted && (
+                          <div className="mb-1">
+                            <span className="inline-flex items-center gap-1 text-xs font-medium text-amber-600 dark:text-amber-400">
+                              <Folder size={12} />
+                              Parent folder &quot;{folder.parentFolder.name}&quot; is also in trash
+                            </span>
+                          </div>
+                        )}
+                        {folder.parentProject?.isDeleted && (
+                          <div className="mb-1">
+                            <span className="inline-flex items-center gap-1 text-xs font-medium text-amber-600 dark:text-amber-400">
+                              <FolderKanban size={12} />
+                              Parent project &quot;{folder.parentProject.title}&quot; is also in trash
+                            </span>
+                          </div>
+                        )}
+                        <h3 className="flex items-center gap-2 font-semibold text-slate-900 dark:text-slate-100">
+                          <Folder size={16} className="shrink-0 text-amber-500" />
+                          {folder.name}
+                        </h3>
+                        <p className="text-xs text-slate-400 mt-1 dark:text-slate-500">
+                          Deleted {formatDeletedAt(folder.deletedAt)}
+                        </p>
+                      </div>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => restore("folders", folder._id)}
+                          disabled={actionId === folder._id}
+                          className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm text-cyan-700 border border-cyan-300 hover:bg-cyan-50 disabled:opacity-50 dark:text-cyan-400 dark:border-cyan-500/30 dark:hover:bg-cyan-400/10"
+                        >
+                          <RotateCcw size={14} />
+                          Restore
+                        </button>
+                        <button
+                          onClick={() =>
+                            permanentDelete("folders", folder._id, folder.name)
+                          }
+                          disabled={actionId === folder._id}
+                          className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm text-red-500 border border-red-300 hover:bg-red-50 disabled:opacity-50 dark:text-red-400 dark:border-red-500/30 dark:hover:bg-red-500/10"
+                        >
+                          <Trash2 size={14} />
+                          Delete Permanently
+                        </button>
+                      </div>
                     </div>
-                    <div className="flex gap-2">
-                      <button
-                        onClick={() => restore("organizations", org._id)}
-                        disabled={actionId === org._id}
-                        className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm text-cyan-700 border border-cyan-300 hover:bg-cyan-50 disabled:opacity-50 dark:text-cyan-400 dark:border-cyan-500/30 dark:hover:bg-cyan-400/10"
-                      >
-                        <RotateCcw size={14} />
-                        Restore
-                      </button>
-                      <button
-                        onClick={() =>
-                          permanentDelete("organizations", org._id, org.name)
-                        }
-                        disabled={actionId === org._id}
-                        className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm text-red-500 border border-red-300 hover:bg-red-50 disabled:opacity-50 dark:text-red-400 dark:border-red-500/30 dark:hover:bg-red-500/10"
-                      >
-                        <Trash2 size={14} />
-                        Delete Permanently
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
+                  ))}
+                </div>
+              )
+            ) : null}
           </div>
         </main>
       </div>

@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { authFetch } from "@/lib/validation/authFetch";
 import { toast } from "@/components/ui/toast";
+import Select, { fieldSelectTriggerClass } from "@/components/ui/Select";
 
 export default function CreateTaskPage() {
   const [task, setTask] = useState({
@@ -131,45 +132,30 @@ export default function CreateTaskPage() {
                   Priority
                 </label>
 
-                <select
+                <Select
                   value={task.priority}
-                  onChange={(e) =>
+                  onChange={(next) =>
                     setTask({
                       ...task,
-                      priority:
-                        e.target.value,
+                      priority: next,
                     })
                   }
-                  className={`
-                    w-full
-                    p-4
-                    rounded-xl
-                    border
-                    font-medium
-                    ${
-                      task.priority ===
-                      "High"
+                  className="w-full"
+                  triggerClassName={(open) => {
+                    const tone =
+                      task.priority === "High"
                         ? "bg-red-50 border-red-300 text-red-700 dark:bg-red-500/10 dark:border-red-500/30 dark:text-red-400"
-                        : task.priority ===
-                          "Medium"
-                        ? "bg-yellow-50 border-yellow-300 text-yellow-700 dark:bg-yellow-500/10 dark:border-yellow-500/30 dark:text-yellow-400"
-                        : "bg-green-50 border-green-300 text-green-700 dark:bg-green-500/10 dark:border-green-500/30 dark:text-green-400"
-                    }
-                  `}
-                >
-                  <option value="Low">
-                    🟢 Low
-                  </option>
-
-                  <option value="Medium">
-                    🟡 Medium
-                  </option>
-
-                  <option value="High">
-                    🔴 High
-                  </option>
-
-                </select>
+                        : task.priority === "Medium"
+                          ? "bg-yellow-50 border-yellow-300 text-yellow-700 dark:bg-yellow-500/10 dark:border-yellow-500/30 dark:text-yellow-400"
+                          : "bg-green-50 border-green-300 text-green-700 dark:bg-green-500/10 dark:border-green-500/30 dark:text-green-400";
+                    return fieldSelectTriggerClass(open, `font-medium ${tone}`);
+                  }}
+                  options={[
+                    { value: "Low", label: "🟢 Low" },
+                    { value: "Medium", label: "🟡 Medium" },
+                    { value: "High", label: "🔴 High" },
+                  ]}
+                />
 
                 <div className="mt-3">
 
@@ -229,30 +215,23 @@ export default function CreateTaskPage() {
                   Task Status
                 </label>
 
-                <select
+                <Select
                   value={task.status}
-                  onChange={(e) =>
+                  onChange={(next) =>
                     setTask({
                       ...task,
-                      status:
-                        e.target.value,
+                      status: next,
                     })
                   }
-                  className="w-full bg-slate-50 border border-slate-200 p-4 rounded-xl text-slate-900 dark:bg-slate-800 dark:border-slate-700 dark:text-slate-100"
-                >
-                  <option>
-                    To Do
-                  </option>
-                  <option>
-                    In Progress
-                  </option>
-                  <option>
-                    Review
-                  </option>
-                  <option>
-                    Completed
-                  </option>
-                </select>
+                  className="w-full"
+                  triggerClassName={fieldSelectTriggerClass}
+                  options={[
+                    { value: "To Do", label: "To Do" },
+                    { value: "In Progress", label: "In Progress" },
+                    { value: "Review", label: "Review" },
+                    { value: "Completed", label: "Completed" },
+                  ]}
+                />
 
               </div>
 

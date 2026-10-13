@@ -314,6 +314,9 @@ export default function InboxPage() {
 
   useEffect(() => {
     loadItems();
+    const onWorkspaceChange = () => void loadItems();
+    window.addEventListener("workspace-changed", onWorkspaceChange);
+    return () => window.removeEventListener("workspace-changed", onWorkspaceChange);
   }, [loadItems]);
 
   const filtered = useMemo(() => {

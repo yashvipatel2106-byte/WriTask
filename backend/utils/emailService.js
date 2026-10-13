@@ -68,19 +68,45 @@ const sendGoogleSignupPasswordEmail = async ({ email, tempPassword }) => {
 
 /* -------------------- Forgot Password -------------------- */
 
-const sendForgotPasswordEmail = async ({ email, resetLink }) => {
+const sendForgotPasswordEmail = async ({
+  email,
+  resetLink,
+  organizationName,
+}) => {
+  const forOrg = organizationName
+    ? ` for <strong>${organizationName}</strong>`
+    : "";
+  const subject = organizationName
+    ? `Reset password for ${organizationName}`
+    : "Reset Password";
+
   await transporter.sendMail({
     from: process.env.SMTP_EMAIL,
     to: email,
-    subject: "Reset Password",
+    subject,
     html: `
-      <h2>Reset Password</h2>
+      <div style="font-family: Arial, sans-serif; max-width: 560px;">
+        <h2>Reset Password${organizationName ? ` — ${organizationName}` : ""}</h2>
 
-      <p>Click below to reset your password:</p>
+        <p>
+          You requested a password reset${forOrg} on WriTask.
+          ${
+            organizationName
+              ? "This link updates only that organization's password. Your other organizations are unchanged."
+              : "Click below to choose a new password."
+          }
+        </p>
 
-      <a href="${resetLink}">
-        Reset Password
-      </a>
+        <p>
+          <a href="${resetLink}" style="display:inline-block;padding:10px 16px;background:#0891b2;color:#fff;text-decoration:none;border-radius:8px;">
+            Reset password${organizationName ? ` for ${organizationName}` : ""}
+          </a>
+        </p>
+
+        <p style="color:#64748b;font-size:13px;">
+          If you did not request this, you can ignore this email.
+        </p>
+      </div>
     `,
   });
 };
@@ -325,6 +351,154 @@ const sendContactSupportEmail = async ({ name, email, subject, message }) => {
   });
 };
 
+/* ---------------- Request Form thank-you email ---------------- */
+
+const sendRequestFormThankYouEmail = async ({
+  to,
+  formName,
+  requestReference,
+  senderName,
+  greeting,
+  message,
+  closing,
+  responses = [],
+  mentionedByName,
+}) => {
+  const resolvedSender = senderName?.trim() || "WriTask";
+
+  const responseRows = responses
+    .map(
+      (item) =>
+        `<tr><td style="padding:4px 12px 4px 0;color:#64748b;vertical-align:top;white-space:nowrap;">${escapeHtml(
+          item.label
+        )}</td><td style="padding:4px 0;">${escapeHtml(item.value)}</td></tr>`
+    )
+    .join("");
+
+  await new Promise((resolve, reject) => {
+    transporter.sendMail(
+      {
+        from: process.env.SMTP_EMAIL,
+        to,
+        subject: `${resolvedSender}: We received your request (${requestReference})`,
+        html: `
+          <div style="font-family: Arial, sans-serif; max-width: 560px;">
+            ${
+              mentionedByName
+                ? `<p style="color:#64748b;font-size:13px;">You are receiving this email because you were mentioned in ${escapeHtml(
+                    mentionedByName
+                  )}'s request form.</p>`
+                : ""
+            }
+            <p>${escapeHtml(greeting || "Hello,")}</p>
+            <p>${escapeHtml(message || "We received your request.")}</p>
+            <p><strong>Form:</strong> ${escapeHtml(formName)}<br/>
+               <strong>Reference:</strong> ${escapeHtml(requestReference)}</p>
+            ${
+              responseRows
+                ? `<table style="border-collapse:collapse;margin-top:12px;font-size:13px;">${responseRows}</table>`
+                : ""
+            }
+            <p style="margin-top:16px;">${escapeHtml(closing || "Thank you,")}<br/>${escapeHtml(
+              resolvedSender
+            )}</p>
+          </div>
+        `,
+      },
+      (error, info) => {
+        if (error) {
+          console.error("Error sending request form thank-you email");
+          console.log(error);
+          reject(error);
+        } else {
+          resolve(info);
+        }
+      }
+    );
+  });
+};
+
+/* ---------------- Request Form approval/rejection email ---------------- */
+
+const sendRequestFormReviewEmail = async ({
+  to,
+  formName,
+  requestReference,
+  submittedAt,
+  projectName,
+  status,
+  rejectionReason,
+  mentionedByName,
+  senderName,
+}) => {
+  const resolvedSender = senderName?.trim() || formName;
+
+  const submittedDateLabel = submittedAt
+    ? new Date(submittedAt).toLocaleDateString("en-US", {
+        day: "numeric",
+        month: "long",
+        year: "numeric",
+      })
+    : null;
+
+  const isApproved = status === "approved";
+  const statusLabel = isApproved ? "Approved" : "Rejected";
+
+  const statusSentence = submittedDateLabel
+    ? `Your request submitted on ${escapeHtml(submittedDateLabel)} has been ${escapeHtml(
+        statusLabel.toLowerCase()
+      )}.`
+    : `Your request has been ${escapeHtml(statusLabel.toLowerCase())}.`;
+
+  await new Promise((resolve, reject) => {
+    transporter.sendMail(
+      {
+        from: process.env.SMTP_EMAIL,
+        to,
+        subject: `${escapeHtml(formName)}: Your request has been ${statusLabel.toLowerCase()}`,
+        html: `
+          <div style="font-family: Arial, sans-serif; max-width: 560px;">
+            ${
+              mentionedByName
+                ? `<p style="color:#64748b;font-size:13px;">You are receiving this email because you were mentioned in ${escapeHtml(
+                    mentionedByName
+                  )}'s request form.</p>`
+                : ""
+            }
+            <p>Hello,</p>
+            <p>${statusSentence}</p>
+            <p>
+              <strong>Form:</strong> ${escapeHtml(formName)}<br/>
+              <strong>Reference:</strong> ${escapeHtml(requestReference)}<br/>
+              ${
+                projectName
+                  ? `<strong>Project:</strong> ${escapeHtml(projectName)}<br/>`
+                  : ""
+              }
+              <strong>Status:</strong> ${statusLabel}
+            </p>
+            ${
+              !isApproved && rejectionReason
+                ? `<p><strong>Rejection Reason:</strong> ${escapeHtml(rejectionReason)}</p>`
+                : ""
+            }
+            <p style="margin-top:16px;">Thank you,<br/>${escapeHtml(resolvedSender)}</p>
+          </div>
+        `,
+      },
+      (error, info) => {
+        if (error) {
+          console.error("Error sending request form review email");
+          console.log(error);
+          reject(error);
+        } else {
+          resolve(info);
+        }
+      }
+    );
+  });
+};
+
 module.exports = {
   sendOtpEmail,
   sendGoogleSignupPasswordEmail,
@@ -333,4 +507,6 @@ module.exports = {
   sendProjectInviteEmail,
   sendWeeklyReportEmail,
   sendContactSupportEmail,
+  sendRequestFormThankYouEmail,
+  sendRequestFormReviewEmail,
 };

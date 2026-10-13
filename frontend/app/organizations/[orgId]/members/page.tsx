@@ -9,12 +9,27 @@ import { authFetch } from "@/lib/validation/authFetch";
 import { toast } from "@/components/ui/toast";
 import { confirmDialog } from "@/components/ui/confirm";
 import { useParams, useRouter } from "next/navigation";
+import Link from "next/link";
 import { useEffect, useState } from "react";
 import { useOrgPermission } from "@/hooks/useOrgPermissions";
 import { useOrgRoles } from "@/hooks/useOrgRoles";
 import OrgRoleSelect from "@/components/rbac/OrgRoleSelect";
 import MemberPermissionsDialog from "@/components/rbac/MemberPermissionsDialog";
-import { MoreHorizontal, UserMinus, UserX, Crown, Shield, Mail, RefreshCw } from "lucide-react";
+import MemberResourcePlanningDialog from "@/components/members/MemberResourcePlanningDialog";
+import UserAvatar from "@/components/ui/UserAvatar";
+import { usePresence } from "@/components/context/PresenceProvider";
+import { STATUS_META } from "@/lib/presence";
+import {
+  ArrowLeft,
+  MoreHorizontal,
+  UserMinus,
+  UserX,
+  Crown,
+  Shield,
+  Mail,
+  RefreshCw,
+  Clock,
+} from "lucide-react";
 
 type OrgMember = {
   user: { _id: string; username: string; email: string; avatarColor?: string };
@@ -49,16 +64,18 @@ function avatarInitials(name: string) {
 export default function OrganizationMembersPage() {
   const { orgId } = useParams<{ orgId: string }>();
   const router = useRouter();
-  const { canInviteMembers, canManageMembers, canRemoveMember, canChangeRole, canViewAdmin, role } =
+  const { canInviteMembers, canManageMembers, canRemoveMember, canChangeRole, canViewAdmin, canUpdateOrg, role } =
     useOrgPermission();
   const isOwner = role === "owner";
   const { roles, getLabel } = useOrgRoles(orgId);
+  const { getStatus } = usePresence();
   const [orgName, setOrgName] = useState("");
   const [members, setMembers] = useState<OrgMember[]>([]);
   const [pendingInvites, setPendingInvites] = useState<PendingInvitation[]>([]);
   const [resendingId, setResendingId] = useState<string | null>(null);
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
   const [accessMember, setAccessMember] = useState<OrgMember | null>(null);
+  const [resourceMember, setResourceMember] = useState<OrgMember | null>(null);
   const [deleteAccountTarget, setDeleteAccountTarget] = useState<OrgMember | null>(null);
   const [deleteAccountConfirmText, setDeleteAccountConfirmText] = useState("");
   const [deletingAccount, setDeletingAccount] = useState(false);
@@ -193,6 +210,14 @@ export default function OrganizationMembersPage() {
         <div className="flex h-full">
           <Sidebar />
           <main className="flex-1 min-h-0 ml-0 lg:ml-70 mt-18 h-[calc(100vh-72px)] overflow-y-auto overscroll-contain bg-[#F6F9FC] text-slate-900 p-10 dark:bg-[#0B1120] dark:text-slate-100">
+            <Link
+              href="/settings/organization"
+              className="inline-flex items-center gap-2 text-sm text-cyan-700/80 hover:text-cyan-600 mb-6 dark:text-cyan-400/80 dark:hover:text-cyan-300"
+            >
+              <ArrowLeft size={16} />
+              Back to Organization Settings
+            </Link>
+
             <div className="flex flex-wrap justify-between items-center gap-4 mb-8">
               <div>
                 <h1 className="text-4xl font-bold">
@@ -221,14 +246,14 @@ export default function OrganizationMembersPage() {
                     className="flex flex-wrap items-center justify-between gap-4 p-4 bg-slate-50 rounded-xl border border-slate-200 hover:border-cyan-200 transition dark:bg-slate-800/50 dark:border-slate-700 dark:hover:border-cyan-500/30"
                   >
                     <div className="flex items-center gap-3 min-w-0">
-                      <div
-                        className={`w-10 h-10 rounded-full flex items-center justify-center text-xs font-bold text-white shrink-0 ${
-                          m.user.avatarColor ? "" : "bg-gradient-to-br from-cyan-400 to-purple-500"
-                        }`}
-                        style={m.user.avatarColor ? { background: m.user.avatarColor } : undefined}
-                      >
-                        {avatarInitials(m.user.username)}
-                      </div>
+                      <UserAvatar
+                        name={m.user.username}
+                        color={m.user.avatarColor}
+                        seed={m.user._id}
+                        size={40}
+                        userId={m.user._id}
+                        showStatus
+                      />
                       <div className="min-w-0">
                         {isOwner ? (
                           <button
@@ -250,9 +275,18 @@ export default function OrganizationMembersPage() {
                       </div>
                     </div>
                     <div className="flex items-center gap-3 flex-wrap">
-                      <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-400 dark:border-emerald-500/30">
-                        Active
-                      </span>
+                      {(() => {
+                        const status = getStatus(m.user._id);
+                        const meta = status ? STATUS_META[status] : null;
+                        return (
+                          <span className="inline-flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1 rounded-full bg-slate-100 text-slate-600 border border-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:border-slate-700">
+                            <span
+                              className={`h-2 w-2 rounded-full ${meta?.dotClass || "bg-slate-300 dark:bg-slate-600"}`}
+                            />
+                            {meta?.label || "Loading..."}
+                          </span>
+                        );
+                      })()}
                       {canManageMembers && m.role !== "owner" ? (
                         <OrgRoleSelect
                           roles={roles}
@@ -272,6 +306,17 @@ export default function OrganizationMembersPage() {
                         <span className="text-sm text-cyan-700 px-3 py-1.5 bg-cyan-50 border border-cyan-200 rounded-lg dark:text-cyan-400 dark:bg-cyan-400/10 dark:border-cyan-500/30">
                           {getLabel(m.role)}
                         </span>
+                      )}
+                      {canUpdateOrg && (
+                        <button
+                          type="button"
+                          onClick={() => setResourceMember(m)}
+                          title="Resource planning settings"
+                          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium text-slate-700 border border-slate-300 bg-white hover:bg-slate-50 transition-colors dark:text-slate-200 dark:border-slate-600 dark:bg-slate-800 dark:hover:bg-slate-700"
+                        >
+                          <Clock size={14} />
+                          Capacity
+                        </button>
                       )}
                       {canViewAdmin && m.role !== "owner" && (
                         <button
@@ -400,6 +445,15 @@ export default function OrganizationMembersPage() {
           </main>
         </div>
       </div>
+
+      {resourceMember && (
+        <MemberResourcePlanningDialog
+          orgId={orgId}
+          memberId={resourceMember.user._id}
+          memberName={resourceMember.user.username}
+          onClose={() => setResourceMember(null)}
+        />
+      )}
 
       {accessMember && (
         <MemberPermissionsDialog

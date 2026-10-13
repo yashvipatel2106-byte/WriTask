@@ -6,6 +6,13 @@
  */
 
 import { authJsonFetch } from "@/lib/validation/authJsonFetch";
+import { appendWorkspaceScope, readStoredWorkspaceId } from "@/lib/workspaceStorage";
+
+function workspaceQuerySuffix() {
+  const ws = readStoredWorkspaceId();
+  if (!ws) return "";
+  return `&workspaceId=${encodeURIComponent(ws)}`;
+}
 
 // ── shared fetch wrapper ──────────────────────────────────────────────────────
 async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> {
@@ -52,6 +59,7 @@ export type CalendarEventAPI = {
   type: "task" | "meeting" | "reminder" | "leave";
   priority: "low" | "medium" | "high";
   space: string;
+  workspace?: string | null;
   /** Denormalized project title for task-linked events (from calendar sync). */
   projectName?: string;
   assignees: UserSnap[];
@@ -89,6 +97,7 @@ export type CreateEventPayload = {
   type: "task" | "meeting" | "reminder" | "leave";
   priority?: "low" | "medium" | "high";
   space?: string;
+  workspaceId?: string | null;
   assignees?: string[]; // User _id strings
   taskRef?: string | null;
   /** Only used when type === "task" — creates/updates a linked Task. */
@@ -107,12 +116,24 @@ export type CalendarProjectOption = {
   members: { user: string; role: string }[];
 };
 
-// ── calendar events ───────────────────────────────────────────────────────────
+export type CalendarWorkspaceOption = {
+  id: string;
+  name: string;
+  kind: string;
+  organizationId?: string | null;
+};
+
+export async function fetchCalendarWorkspaces(orgId: string) {
+  const r = await apiFetch<{ workspaces: CalendarWorkspaceOption[] }>(
+    `/workspaces?organizationId=${encodeURIComponent(orgId)}`
+  );
+  return Array.isArray(r.workspaces) ? r.workspaces : [];
+}
 export async function fetchCalendarEvents(orgId: string, month: string, space?: string, all?: boolean) {
   const spaceQs = space && space !== "all" ? `&space=${encodeURIComponent(space)}` : "";
   const allQs = all ? "&all=true" : "";
   const r = await apiFetch<{ success: boolean; data: CalendarEventAPI[] }>(
-    `/organisations/${orgId}/calendar?month=${month}${spaceQs}${allQs}`,
+    `/organisations/${orgId}/calendar?month=${month}${spaceQs}${allQs}${workspaceQuerySuffix()}`,
     { method: "GET" }
   );
   return r.data;
@@ -124,7 +145,7 @@ export async function fetchCalendarEvents(orgId: string, month: string, space?: 
  * currently-loaded month. */
 export async function fetchMemberCalendarEvents(orgId: string, userId: string, month: string) {
   const r = await apiFetch<{ success: boolean; data: CalendarEventAPI[] }>(
-    `/organisations/${orgId}/calendar?month=${month}&userId=${encodeURIComponent(userId)}`,
+    `/organisations/${orgId}/calendar?month=${month}&userId=${encodeURIComponent(userId)}${workspaceQuerySuffix()}`,
     { method: "GET" }
   );
   return r.data;
@@ -132,8 +153,10 @@ export async function fetchMemberCalendarEvents(orgId: string, userId: string, m
 
 // ── projects (reuses the existing /projects list endpoint the sidebar uses) ────
 export async function fetchOrgProjects(orgId: string) {
+  const params = new URLSearchParams({ organizationId: orgId });
+  appendWorkspaceScope(params);
   return apiFetch<CalendarProjectOption[]>(
-    `/projects?organizationId=${orgId}`,
+    `/projects?${params.toString()}`,
     { method: "GET" }
   );
 }
@@ -169,9 +192,12 @@ export async function deleteCalendarEvent(orgId: string, eventId: string) {
 
 // ── org members ───────────────────────────────────────────────────────────────
 export async function fetchOrgMembers(orgId: string, month?: string) {
-  const qs = month ? `?month=${month}` : "";
+  const qs = new URLSearchParams();
+  if (month) qs.set("month", month);
+  appendWorkspaceScope(qs);
+  const query = qs.toString();
   const r = await apiFetch<{ success: boolean; data: OrgMemberWithStats[] }>(
-    `/organisations/${orgId}/calendar/members${qs}`
+    `/organisations/${orgId}/calendar/members${query ? `?${query}` : ""}`
   );
   return r.data.map((m) => ({
     ...m,
@@ -182,8 +208,10 @@ export async function fetchOrgMembers(orgId: string, month?: string) {
 
 /** All active tasks in the org assigned to a specific team member. */
 export async function fetchMemberAssignedTasks(orgId: string, memberId: string) {
+  const params = appendWorkspaceScope(new URLSearchParams());
+  const qs = params.toString();
   const r = await apiFetch<{ success: boolean; data: MemberAssignedTask[] }>(
-    `/organisations/${orgId}/calendar/members/${encodeURIComponent(memberId)}/tasks`,
+    `/organisations/${orgId}/calendar/members/${encodeURIComponent(memberId)}/tasks${qs ? `?${qs}` : ""}`,
     { method: "GET" }
   );
   return r.data;
@@ -191,8 +219,10 @@ export async function fetchMemberAssignedTasks(orgId: string, memberId: string) 
 
 // ── task sync ─────────────────────────────────────────────────────────────────
 export async function syncTasksToCalendar(orgId: string) {
+  const params = appendWorkspaceScope(new URLSearchParams());
+  const qs = params.toString();
   const r = await apiFetch<{ success: boolean; message: string }>(
-    `/organisations/${orgId}/calendar/sync-tasks`,
+    `/organisations/${orgId}/calendar/sync-tasks${qs ? `?${qs}` : ""}`,
     { method: "POST" }
   );
   return r.message;

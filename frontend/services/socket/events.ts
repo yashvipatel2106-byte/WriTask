@@ -6,4 +6,7 @@ export const EVENTS = {
 
   PROJECT_JOIN: "project-join",
   PROJECT_LEAVE: "project-leave",
+
+  PRESENCE_HEARTBEAT: "presence:heartbeat",
+  PRESENCE_UPDATE: "presence:update",
 };

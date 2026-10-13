@@ -10,6 +10,7 @@ require("../models/Project");
 const {
   createProject,
   getProjects,
+  getProjectTree,
   getProject,
   updateProject,
   deleteProject,
@@ -22,8 +23,12 @@ const {
   getMyPendingProjectInvitations,
   getProjectInvitations,
   resendProjectInvitation,
+  createCustomField,
+  deleteCustomField,
 } = require("../controllers/projectController");
 const taskRoutes = require("./taskRoutes");
+const milestoneRoutes = require("./milestoneRoutes");
+const baselineRoutes = require("./baselineRoutes");
 
 // All routes below require login
 router.use(authMiddleware);
@@ -35,12 +40,25 @@ router.post("/invitations/accept", acceptProjectInvitation);
 // ── Project CRUD ──────────────────────────────────────────────────
 router.post("/", createProject);                                          // Create project (any logged-in user)
 router.get("/", getProjects);                                             // Get my projects
+router.get("/tree", getProjectTree);                                      // Nested folder/file/project tree
 router.get("/:projectId", requireProjectRole("project:read"), getProject);         // Get one project
 router.put("/:projectId", requireProjectRole("project:update"), updateProject);    // Edit project
+router.post(
+  "/:projectId/custom-fields",
+  requireProjectRole("project:update"),
+  createCustomField
+);
+router.delete(
+  "/:projectId/custom-fields/:fieldId",
+  requireProjectRole("project:update"),
+  deleteCustomField
+);
 router.patch("/:projectId/trash", moveProjectToTrash);                             // Move to trash
 router.delete("/:projectId", requireProjectRole("project:delete"), deleteProject); // Permanent delete (must be in trash)
 
-// ── Tasks (scoped to project) ─────────────────────────────────────
+// ── Tasks and milestones (scoped to project) ─────────────────────
+router.use("/:projectId/milestones", milestoneRoutes);
+router.use("/:projectId/baselines", baselineRoutes);
 router.use("/:projectId/tasks", taskRoutes);
 
 // ── Member Management ─────────────────────────────────────────────

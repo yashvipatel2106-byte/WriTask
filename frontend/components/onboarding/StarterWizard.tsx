@@ -476,6 +476,7 @@ export default function StarterWizard() {
     localStorage.setItem("user", JSON.stringify(stored));
     if (id) localStorage.setItem("userId", id);
     if (data.organizationId) writeStoredOrgId(String(data.organizationId));
+    else writeStoredOrgId(null);
     setHasPassword(stored.hasPassword);
     setAuthed(true);
   };
@@ -610,16 +611,24 @@ export default function StarterWizard() {
       } catch {
         /* ignore */
       }
-      persistSession(loginData);
+      persistSession({
+        token: loginData.token,
+        user: loginData.user,
+        organizationId: null,
+      });
+      writeStoredOrgId(null);
+      clearStoredProjectId();
       setHasPassword(true);
       setAuthed(true);
-      writeWizardState({
-        step: "org",
-        authed: true,
-        email: verifyEmail,
-        name: name.trim() || undefined,
-      });
-      goTo("org");
+      try {
+        clearWizardState();
+        sessionStorage.removeItem(WIZARD_PW_KEY);
+      } catch {
+        /* ignore */
+      }
+      // Account is ready — open Personal Workspace (org setup is optional later).
+      window.location.href = "/dashboard";
+      return;
     } catch {
       setError("Could not verify. Please try again.");
     } finally {

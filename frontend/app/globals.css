@@ -30,6 +30,10 @@
   --accent-hover: #0E7490;
   --accent-soft: #ECFEFF;
   --accent-soft-strong: #CFFAFE;
+  --nav-bg: #E0F7FA;
+  --nav-bg-hover: #CFFAFE;
+  --nav-text: #164E63;
+  --nav-text-muted: #0E7490;
 
   --danger: #DC2626;
   --danger-soft: #FEF2F2;
@@ -414,6 +418,10 @@ body {
   --accent-hover: #67E8F9;
   --accent-soft: #0E2A33;
   --accent-soft-strong: #164E5B;
+  --nav-bg: #0F2530;
+  --nav-bg-hover: #173542;
+  --nav-text: #E0F7FA;
+  --nav-text-muted: #A5F3FC;
 
   --danger: #F87171;
   --danger-soft: #2A1414;
@@ -427,6 +435,231 @@ body {
   --shadow-lg: 0 8px 25px rgba(0, 0, 0, 0.5);
   --shadow-hover: 0 12px 32px rgba(0, 0, 0, 0.55);
 }
+
+/* Colour palettes are intentionally token-based: selecting one updates the
+   application canvas, top bar, side bar, shared controls and active states
+   without changing the user's light/dark preference. */
+html[data-color-theme] {
+  transition: background-color .2s ease, color .2s ease;
+}
+html[data-color-theme] body,
+html[data-color-theme] [class~="bg-[#F6F9FC]"] {
+  background-color: var(--page-bg) !important;
+}
+html[data-color-theme] .app-topbar {
+  background: var(--nav-bg) !important;
+  border-color: var(--border) !important;
+  box-shadow: 0 1px 0 color-mix(in srgb, var(--accent) 9%, transparent);
+}
+html[data-color-theme] .app-sidebar {
+  background: linear-gradient(180deg, var(--nav-bg), color-mix(in srgb, var(--nav-bg) 88%, var(--surface))) !important;
+  border-color: var(--border) !important;
+}
+html[data-color-theme] .app-topbar [class~="text-slate-900"],
+html[data-color-theme] .app-topbar [class~="text-slate-800"],
+html[data-color-theme] .app-topbar [class~="text-slate-700"],
+html[data-color-theme] .app-sidebar [class~="text-slate-900"],
+html[data-color-theme] .app-sidebar [class~="text-slate-800"],
+html[data-color-theme] .app-sidebar [class~="text-slate-700"] { color: var(--nav-text) !important; }
+html[data-color-theme] .app-sidebar .sidebar-item { color: var(--nav-text-muted); }
+html[data-color-theme] .app-sidebar .sidebar-item:hover { background: var(--nav-bg-hover); color: var(--nav-text); }
+html[data-color-theme] .app-sidebar .active-sidebar { background: color-mix(in srgb, var(--nav-text) 16%, transparent); color: var(--nav-text); }
+html[data-color-theme] .app-sidebar .sidebar-heading { color: color-mix(in srgb, var(--nav-text-muted) 75%, transparent); }
+
+/* App-wide compatibility layer for the existing Tailwind utility classes.
+   It keeps every legacy screen on the selected palette while new components
+   can use the design tokens directly. Status colours (red/amber/green) are
+   deliberately left alone so their meaning remains recognisable. */
+html[data-color-theme] [class~="bg-white"],
+html[data-color-theme] [class~="bg-slate-50"] { background-color: var(--surface) !important; }
+html[data-color-theme] [class~="bg-slate-100"],
+html[data-color-theme] [class~="bg-slate-200"] { background-color: var(--surface-muted) !important; }
+html[data-color-theme] [class~="border-slate-100"],
+html[data-color-theme] [class~="border-slate-200"],
+html[data-color-theme] [class~="border-slate-300"],
+html[data-color-theme] [class~="border-slate-400"] { border-color: var(--border) !important; }
+html[data-color-theme] [class~="text-slate-900"],
+html[data-color-theme] [class~="text-slate-800"],
+html[data-color-theme] [class~="text-slate-700"] { color: var(--text-primary) !important; }
+html[data-color-theme] [class~="text-slate-600"],
+html[data-color-theme] [class~="text-slate-500"] { color: var(--text-secondary) !important; }
+html[data-color-theme] [class~="text-slate-400"],
+html[data-color-theme] [class~="text-slate-300"] { color: var(--text-tertiary) !important; }
+
+html[data-color-theme] [class~="bg-cyan-50"],
+html[data-color-theme] [class~="bg-cyan-100"],
+html[data-color-theme] [class~="bg-blue-50"],
+html[data-color-theme] [class~="bg-blue-100"] { background-color: var(--accent-soft) !important; }
+html[data-color-theme] [class~="bg-cyan-500"],
+html[data-color-theme] [class~="bg-cyan-600"],
+html[data-color-theme] [class~="bg-cyan-700"],
+html[data-color-theme] [class~="bg-blue-500"],
+html[data-color-theme] [class~="bg-blue-600"],
+html[data-color-theme] [class~="bg-blue-700"] { background-color: var(--accent) !important; }
+html[data-color-theme] [class~="text-cyan-500"],
+html[data-color-theme] [class~="text-cyan-600"],
+html[data-color-theme] [class~="text-cyan-700"],
+html[data-color-theme] [class~="text-blue-500"],
+html[data-color-theme] [class~="text-blue-600"],
+html[data-color-theme] [class~="text-blue-700"] { color: var(--accent-hover) !important; }
+html[data-color-theme] [class~="border-cyan-200"],
+html[data-color-theme] [class~="border-cyan-300"],
+html[data-color-theme] [class~="border-cyan-400"],
+html[data-color-theme] [class~="border-blue-200"],
+html[data-color-theme] [class~="border-blue-300"],
+html[data-color-theme] [class~="border-blue-400"] { border-color: var(--accent) !important; }
+html[data-color-theme] [class~="hover:bg-slate-50"]:hover,
+html[data-color-theme] [class~="hover:bg-slate-100"]:hover,
+html[data-color-theme] [class~="hover:bg-white"]:hover { background-color: var(--surface-muted) !important; }
+html[data-color-theme] [class~="hover:bg-cyan-50"]:hover,
+html[data-color-theme] [class~="hover:bg-cyan-100"]:hover,
+html[data-color-theme] [class~="hover:bg-blue-50"]:hover,
+html[data-color-theme] [class~="hover:bg-blue-100"]:hover { background-color: var(--accent-soft) !important; }
+html[data-color-theme] [class~="hover:bg-cyan-600"]:hover,
+html[data-color-theme] [class~="hover:bg-cyan-700"]:hover,
+html[data-color-theme] [class~="hover:bg-blue-600"]:hover,
+html[data-color-theme] [class~="hover:bg-blue-700"]:hover { background-color: var(--accent-hover) !important; }
+
+html.dark[data-color-theme] [class~="dark:bg-slate-950"],
+html.dark[data-color-theme] [class~="dark:bg-slate-900"] { background-color: var(--surface) !important; }
+html.dark[data-color-theme] [class~="dark:bg-slate-800"],
+html.dark[data-color-theme] [class~="dark:bg-slate-700"] { background-color: var(--surface-muted) !important; }
+html.dark[data-color-theme] [class~="dark:border-slate-800"],
+html.dark[data-color-theme] [class~="dark:border-slate-700"],
+html.dark[data-color-theme] [class~="dark:border-slate-600"] { border-color: var(--border) !important; }
+html.dark[data-color-theme] [class~="dark:text-slate-100"],
+html.dark[data-color-theme] [class~="dark:text-white"],
+html.dark[data-color-theme] [class~="dark:text-slate-200"] { color: var(--text-primary) !important; }
+html.dark[data-color-theme] [class~="dark:text-slate-300"],
+html.dark[data-color-theme] [class~="dark:text-slate-400"],
+html.dark[data-color-theme] [class~="dark:text-slate-500"] { color: var(--text-secondary) !important; }
+html.dark[data-color-theme] [class~="dark:bg-cyan-500/10"],
+html.dark[data-color-theme] [class~="dark:bg-blue-500/10"] { background-color: var(--accent-soft) !important; }
+html.dark[data-color-theme] [class~="dark:text-cyan-400"],
+html.dark[data-color-theme] [class~="dark:text-blue-400"] { color: var(--accent) !important; }
+
+/* Black theme: cyan/blue labels use the accent (not the lighter hover tone). */
+html.dark[data-color-theme="black"] [class~="text-cyan-500"],
+html.dark[data-color-theme="black"] [class~="text-cyan-600"],
+html.dark[data-color-theme="black"] [class~="text-cyan-700"],
+html.dark[data-color-theme="black"] [class~="text-blue-500"],
+html.dark[data-color-theme="black"] [class~="text-blue-600"],
+html.dark[data-color-theme="black"] [class~="text-blue-700"],
+html.dark[data-color-theme="black"] [class~="dark:text-cyan-400"],
+html.dark[data-color-theme="black"] [class~="dark:text-blue-400"] {
+  color: #CBD5E1 !important;
+}
+
+/* The account-settings navigation is intentionally a middle shade: darker
+   than the page canvas, but lighter and quieter than the primary navigation. */
+html[data-color-theme] .settings-subnav {
+  background: color-mix(in srgb, var(--page-bg) 48%, var(--nav-bg)) !important;
+  border-color: color-mix(in srgb, var(--border) 72%, var(--nav-bg)) !important;
+}
+html[data-color-theme] .settings-subnav h2 { color: var(--nav-text) !important; }
+html[data-color-theme] .settings-subnav p { color: var(--nav-text-muted) !important; }
+html[data-color-theme] .settings-subnav a { color: var(--nav-text-muted) !important; }
+html[data-color-theme] .settings-subnav a:hover {
+  background: color-mix(in srgb, var(--nav-bg-hover) 68%, transparent) !important;
+  color: var(--nav-text) !important;
+}
+html[data-color-theme] .settings-subnav a[aria-current="page"] {
+  background: color-mix(in srgb, var(--accent) 14%, transparent) !important;
+  color: var(--nav-text) !important;
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+/* Appearance gallery: each choice is a small, readable preview of the
+   actual page/sidebar/topbar relationship before it is applied. */
+.appearance-gallery { max-width: 1080px; }
+.appearance-gallery__heading { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 20px; }
+.appearance-gallery__heading h2 { margin: 0; color: var(--text-primary); font-size: 18px; font-weight: 700; }
+.appearance-gallery__heading p { margin: 4px 0 0; color: var(--text-secondary); font-size: 14px; }
+.theme-preview-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.theme-preview { min-width: 0; overflow: hidden; border: 2px solid transparent; border-radius: 14px; background: var(--surface); text-align: left; box-shadow: var(--shadow-sm); transition: border-color .16s ease, box-shadow .16s ease, transform .16s ease; }
+.theme-preview:hover { transform: translateY(-2px); box-shadow: var(--shadow-md); }
+.theme-preview--selected { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 20%, transparent), var(--shadow-md); }
+.theme-preview__canvas { display: grid; grid-template-columns: 30% 1fr; position: relative; height: 142px; overflow: hidden; background: var(--preview-page); }
+.theme-preview__nav { display: flex; flex-direction: column; gap: 8px; padding: 17px 9px; background: var(--preview-nav); }
+.theme-preview__nav i { display: block; width: 75%; height: 6px; border-radius: 99px; background: color-mix(in srgb, var(--preview-accent) 40%, transparent); }
+.theme-preview__nav i:nth-child(2) { width: 100%; height: 13px; background: color-mix(in srgb, var(--preview-accent) 55%, transparent); }
+.theme-preview__content { display: flex; flex-wrap: wrap; align-content: flex-start; gap: 9px; padding: 16px 13px; }
+.theme-preview__content i { width: 66%; height: 7px; border-radius: 99px; background: color-mix(in srgb, var(--preview-accent) 24%, var(--preview-surface)); }
+.theme-preview__content i:nth-child(2) { width: 36%; }
+.theme-preview__content b { display: block; width: 100%; height: 42px; margin-top: 4px; border-radius: 7px; background: var(--preview-surface); box-shadow: 0 1px 5px rgba(15, 23, 42, .12); }
+.theme-preview__content em { width: 42%; height: 8px; border-radius: 99px; background: color-mix(in srgb, var(--preview-accent) 18%, var(--preview-surface)); }
+.theme-preview__content em:last-child { width: 28%; }
+.theme-preview__badge { position: absolute; right: 10px; top: 10px; width: 9px; height: 9px; border-radius: 999px; background: var(--preview-accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--preview-accent) 18%, transparent); }
+.theme-preview__footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 56px; padding: 10px 12px; color: var(--text-primary); }
+.theme-preview__footer strong, .theme-preview__footer small { display: block; }
+.theme-preview__footer strong { font-size: 14px; font-weight: 650; }
+.theme-preview__footer small { margin-top: 2px; color: var(--text-tertiary); font-size: 12px; }
+.theme-preview--selected .theme-preview__footer > svg { color: var(--accent); }
+@media (min-width: 768px) { .theme-preview-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (min-width: 1280px) { .theme-preview-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+
+html[data-color-theme="white"] { --page-bg: #F8FAFC; --nav-bg: #E2E8F0; --nav-bg-hover: #CBD5E1; --nav-text: #0F172A; --nav-text-muted: #475569; --accent: #475569; --accent-hover: #334155; --accent-soft: #F1F5F9; --accent-soft-strong: #CBD5E1; }
+html.dark[data-color-theme="black"] {
+  --page-bg: #080C14;
+  --nav-bg: #020617;
+  --nav-bg-hover: #111827;
+  --nav-text: #F8FAFC;
+  --nav-text-muted: #CBD5E1;
+  --surface: #0F172A;
+  --surface-muted: #1E293B;
+  --border: #1E293B;
+  --border-strong: #334155;
+  /* Mid-slate accents keep white button labels readable on hover.
+     Pure white (#FFF) as --accent-hover made .btn-primary / hover:bg-cyan-*
+     turn into an invisible white pill. */
+  --accent: #64748B;
+  --accent-hover: #94A3B8;
+  --accent-soft: #1E293B;
+  --accent-soft-strong: #334155;
+}
+
+/* Black theme: never let primary actions hover to white-on-white. */
+html.dark[data-color-theme="black"] .btn-primary,
+html.dark[data-color-theme="black"] .btn-primary:hover:not(:disabled) {
+  color: #F8FAFC;
+}
+html.dark[data-color-theme="black"] [class~="hover:bg-cyan-600"]:hover,
+html.dark[data-color-theme="black"] [class~="hover:bg-cyan-700"]:hover,
+html.dark[data-color-theme="black"] [class~="hover:bg-blue-600"]:hover,
+html.dark[data-color-theme="black"] [class~="hover:bg-blue-700"]:hover {
+  background-color: var(--accent-hover) !important;
+  color: #F8FAFC !important;
+}
+/* Ocean Blue — primary #2563EB · secondary #60A5FA · background #F8FAFC */
+html[data-color-theme="blue"] { --page-bg: #F8FAFC; --nav-bg: #DBEAFE; --nav-bg-hover: #BFDBFE; --nav-text: #1E40AF; --nav-text-muted: #2563EB; --accent: #2563EB; --accent-hover: #1D4ED8; --accent-soft: #EFF6FF; --accent-soft-strong: #BFDBFE; }
+/* Purple — primary #7C3AED · secondary #A78BFA · background #FAF9FF */
+html[data-color-theme="purple"] { --page-bg: #FAF9FF; --nav-bg: #EDE9FE; --nav-bg-hover: #DDD6FE; --nav-text: #5B21B6; --nav-text-muted: #7C3AED; --accent: #7C3AED; --accent-hover: #6D28D9; --accent-soft: #F5F3FF; --accent-soft-strong: #DDD6FE; }
+/* Emerald — primary #059669 · secondary #34D399 · background #F0FDF4 */
+html[data-color-theme="emerald"] { --page-bg: #F0FDF4; --nav-bg: #D1FAE5; --nav-bg-hover: #A7F3D0; --nav-text: #065F46; --nav-text-muted: #059669; --accent: #059669; --accent-hover: #047857; --accent-soft: #ECFDF5; --accent-soft-strong: #A7F3D0; }
+/* Teal — primary #0D9488 · secondary #2DD4BF · background #F0FDFA */
+html[data-color-theme="teal"] { --page-bg: #F0FDFA; --nav-bg: #CCFBF1; --nav-bg-hover: #99F6E4; --nav-text: #115E59; --nav-text-muted: #0D9488; --accent: #0D9488; --accent-hover: #0F766E; --accent-soft: #F0FDFA; --accent-soft-strong: #99F6E4; }
+/* Orange — primary #EA580C · secondary #FB923C · background #FFF7ED */
+html[data-color-theme="orange"] { --page-bg: #FFF7ED; --nav-bg: #FFEDD5; --nav-bg-hover: #FED7AA; --nav-text: #9A3412; --nav-text-muted: #EA580C; --accent: #EA580C; --accent-hover: #C2410C; --accent-soft: #FFF7ED; --accent-soft-strong: #FED7AA; }
+/* Red — primary #DC2626 · secondary #F87171 · background #FEF2F2 */
+html[data-color-theme="red"] { --page-bg: #FEF2F2; --nav-bg: #FEE2E2; --nav-bg-hover: #FECACA; --nav-text: #991B1B; --nav-text-muted: #DC2626; --accent: #DC2626; --accent-hover: #B91C1C; --accent-soft: #FEF2F2; --accent-soft-strong: #FECACA; }
+/* Pink — primary #DB2777 · secondary #F472B6 · background #FDF2F8 */
+html[data-color-theme="pink"] { --page-bg: #FDF2F8; --nav-bg: #FCE7F3; --nav-bg-hover: #FBCFE8; --nav-text: #9D174D; --nav-text-muted: #DB2777; --accent: #DB2777; --accent-hover: #BE185D; --accent-soft: #FDF2F8; --accent-soft-strong: #FBCFE8; }
+/* Amber — primary #D97706 · secondary #FBBF24 · background #FFFBEB */
+html[data-color-theme="amber"] { --page-bg: #FFFBEB; --nav-bg: #FEF3C7; --nav-bg-hover: #FDE68A; --nav-text: #92400E; --nav-text-muted: #D97706; --accent: #D97706; --accent-hover: #B45309; --accent-soft: #FFFBEB; --accent-soft-strong: #FDE68A; }
+
+.theme-preferences__icon {
+  display: flex; align-items: center; justify-content: center; width: 40px; height: 40px;
+  border-radius: 12px; background: var(--accent-soft); color: var(--accent);
+}
+.theme-choice, .theme-palette {
+  display: flex; align-items: center; gap: 10px; min-height: 48px; padding: 10px 12px;
+  border: 1px solid var(--border); border-radius: 12px; color: var(--text-secondary);
+  background: var(--surface-muted); transition: border-color .16s ease, background-color .16s ease, color .16s ease, transform .16s ease;
+}
+.theme-choice:hover, .theme-palette:hover { border-color: var(--accent); color: var(--text-primary); transform: translateY(-1px); }
+.theme-choice--selected, .theme-palette--selected { border-color: var(--accent); background: var(--accent-soft); color: var(--accent-hover); }
+.theme-palette__swatches { display: flex; overflow: hidden; width: 32px; height: 32px; border-radius: 10px; box-shadow: inset 0 0 0 1px rgba(15, 23, 42, .08); }
+.theme-palette__swatches i { flex: 1; }
 
 /* Toast — enter from bottom corner */
 @keyframes toast-in {

@@ -90,6 +90,13 @@ const calendarEventSchema = new mongoose.Schema(
       type: String,
       default: "Internal",
     },
+    /** Linked workspace (Internal / External / Personal / custom). */
+    workspace: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Workspace",
+      default: null,
+      index: true,
+    },
     /**
      * reminderNotified — set once the scheduled reminder notification (creator
      * + assignees, fired at `date`/`time` by the reminderNotifier cron job)
@@ -132,6 +139,7 @@ const calendarEventSchema = new mongoose.Schema(
 );
 
 // Indexes for fast org + date range + visibility queries
+calendarEventSchema.index({ organization: 1, workspace: 1, date: 1 });
 calendarEventSchema.index({ organization: 1, date: 1 });
 calendarEventSchema.index({ organization: 1, date: 1, createdBy: 1 });
 calendarEventSchema.index({ organization: 1, date: 1, assignees: 1 });

@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import {
   useCallback,
@@ -14,14 +14,26 @@ import DOMPurify from "dompurify";
 import { authFetch } from "@/lib/validation/authFetch";
 import { apiUrl } from "@/lib/validation/api";
 import type { TaskItem, TaskAttachment } from "./KanbanBoard";
+import type { CardPreviewConfig, ProjectCustomField } from "@/lib/kanbanCardPreview";
+import { resolveTaskEditableCustomFields } from "@/lib/kanbanCardPreview";
+import type { TaskCustomFieldValue } from "@/lib/customFieldValues";
+import { emptyCustomFieldValue } from "@/lib/customFieldValues";
+import TaskCustomFields from "./TaskCustomFields";
+import type { TaskDetailSystemField } from "./TaskCustomFields";
 import { buildStatusOptions } from "@/lib/taskStatuses";
 import { avatarBg, avatarInitials } from "@/lib/avatarColor";
+import {
+  formatCardDateNumeric,
+  formatEffortHours,
+  formatScheduleDisplayNumeric,
+} from "@/lib/taskDisplayFormat";
 import { PRIORITY_OPTIONS } from "@/lib/constants/taskPriority";
 import { ModalShell } from "@/components/ui/Modal";
 import Select from "@/components/ui/Select";
 import { confirmDialog } from "@/components/ui/confirm";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import JoditDescriptionEditor from "./JoditDescriptionEditor";
+import DescriptionChangeViewer from "./DescriptionChangeViewer";
 import {
   X,
   Paperclip,
@@ -47,6 +59,7 @@ import {
   FileText,
   Pencil,
   RotateCcw,
+  Timer as TimerIcon,
 } from "lucide-react";
 import { DayPicker, type DateRange } from "react-day-picker";
 import {
@@ -56,6 +69,9 @@ import {
   parseISO,
 } from "date-fns";
 import WorkingDaysDialog from "./WorkingDaysDialog";
+import TaskTimerControls from "./TaskTimerControls";
+import TaskTimeLogPanel from "./TaskTimeLogPanel";
+import type { TimeEntryDto, TimeSummaryDto } from "@/lib/timeTracking";
 import { buildTaskUrl } from "@/lib/taskUrls";
 import AssigneePicker, {
   assigneeIdsFromTask,
@@ -127,6 +143,7 @@ type TaskActivityEvent = {
   field?: string | null;
   oldValue?: string | null;
   newValue?: string | null;
+  meta?: { previousDescription?: string; newDescription?: string } | null;
   createdAt: string;
 };
 
@@ -166,7 +183,7 @@ type SubtaskItem = {
   assignees?: Array<{ _id: string; username: string; email?: string }>;
 };
 
-export type TaskTab = "details" | "subtasks" | "attachments" | "activity";
+export type TaskTab = "details" | "subtasks" | "attachments" | "time-log" | "activity";
 
 type Props = {
   task: TaskItem & {
@@ -177,6 +194,11 @@ type Props = {
     assignees?: Array<{ _id: string; username: string; email?: string }>;
   };
   projectId: string;
+  customFields?: ProjectCustomField[];
+  otherCustomFields?: ProjectCustomField[];
+  cardPreviewConfig?: CardPreviewConfig | null;
+  adoptedCustomFieldIds?: string[];
+  isPersonalProject?: boolean;
   canEdit: boolean;
   statusOptions?: Array<{ value: string; label: string }>;
   activeSubtaskId?: string | null;
@@ -185,6 +207,8 @@ type Props = {
   onClose: () => void;
   onUpdated: (task: TaskItem) => void;
   onDeleted: (taskId: string) => void;
+  onCustomFieldCreated?: (field: ProjectCustomField) => void;
+  organizationId?: string | null;
   /** Tab to open on first render — e.g. jump straight to Activity from a mention/comment notification. */
   initialTab?: TaskTab;
   /** When provided, shows a "Restore" button in the footer (e.g. viewing a
@@ -397,6 +421,7 @@ function getActivityEventIcon(action: string) {
   if (action === "created") return PlusCircle;
   if (action === "assigned") return UserPlus;
   if (action === "deleted") return Trash2;
+  if (action.startsWith("timer_")) return TimerIcon;
   if (action.includes("attachment")) return Paperclip;
   if (action.includes("date") || action.includes("duration") || action.includes("working")) {
     return Calendar;
@@ -719,11 +744,18 @@ function SectionLabel({
 export default function TaskDetailDialog({
   task,
   projectId,
+  customFields = [],
+  otherCustomFields = [],
+  cardPreviewConfig = null,
+  adoptedCustomFieldIds = [],
+  isPersonalProject = false,
   canEdit,
   statusOptions = DEFAULT_STATUS_OPTIONS,
   onClose,
   onUpdated,
   onDeleted,
+  onCustomFieldCreated,
+  organizationId = null,
   activeSubtaskId = null,
   onSubtaskOpen,
   onNavigateParent,
@@ -763,6 +795,15 @@ export default function TaskDetailDialog({
   } | null>(null);
   const [activityFeed, setActivityFeed] = useState<TaskActivityItem[]>([]);
   const [activityLoading, setActivityLoading] = useState(false);
+  const [descriptionChangeItem, setDescriptionChangeItem] = useState<TaskActivityEvent | null>(
+    null
+  );
+  const [activeTimeEntry, setActiveTimeEntry] = useState<TimeEntryDto | null>(
+    null
+  );
+  const [timeSummary, setTimeSummary] = useState<TimeSummaryDto | null>(null);
+  const [timeEntries, setTimeEntries] = useState<TimeEntryDto[]>([]);
+  const [timeLogLoading, setTimeLogLoading] = useState(false);
   const [chatInput, setChatInput] = useState("");
   const [pendingChatFiles, setPendingChatFiles] = useState<
     { id: string; name: string }[]
@@ -792,7 +833,36 @@ export default function TaskDetailDialog({
   // Explicit "Save changes" button for the main task (no more autosave).
   const [taskSaving, setTaskSaving] = useState(false);
   const [taskSaveMsg, setTaskSaveMsg] = useState("");
-  // Local feedback for the Schedule box's "Save date" confirm action.
+  const [customFieldValues, setCustomFieldValues] =
+    useState<TaskCustomFieldValue[]>(
+    task.customFieldValues || []
+  );
+  const [currentWorkspaceFields, setCurrentWorkspaceFields] =
+    useState<ProjectCustomField[]>(customFields);
+  const [otherWorkspaceFields, setOtherWorkspaceFields] =
+    useState<ProjectCustomField[]>(otherCustomFields);
+
+  /** All active fields for this project's workspace (+ adopted / card-preview from other workspaces). */
+  const taskDetailCustomFields = useMemo(
+    () =>
+      resolveTaskEditableCustomFields(
+        currentWorkspaceFields,
+        otherWorkspaceFields,
+        cardPreviewConfig,
+        adoptedCustomFieldIds
+      ),
+    [
+      currentWorkspaceFields,
+      otherWorkspaceFields,
+      cardPreviewConfig,
+      adoptedCustomFieldIds,
+    ]
+  );
+  const taskEditableCustomFields = taskDetailCustomFields;
+  const taskEditableFieldIds = useMemo(
+    () => new Set(taskEditableCustomFields.map((field) => field.id)),
+    [taskEditableCustomFields]
+  );
   const [dateSaveMsg, setDateSaveMsg] = useState("");
   // Schedule is now a popover opened from a compact summary card instead of
   // an always-visible inline calendar — this just toggles that popover.
@@ -964,6 +1034,48 @@ export default function TaskDetailDialog({
 
   const isSubtaskView = Boolean(activeSubtask);
 
+  const loadTimeTracking = useCallback(async () => {
+    if (isSubtaskView) {
+      setActiveTimeEntry(null);
+      setTimeEntries([]);
+      setTimeSummary(null);
+      return;
+    }
+    setTimeLogLoading(true);
+    try {
+      const [activeRes, listRes] = await Promise.all([
+        authFetch(`/time-entries/active`),
+        authFetch(`/projects/${projectId}/tasks/${task._id}/time-entries`),
+      ]);
+      if (activeRes.ok) {
+        const activeData = await activeRes.json();
+        const entry = activeData.entry as TimeEntryDto | null;
+        const active =
+          entry &&
+          (entry.status === "running" || entry.status === "paused")
+            ? entry
+            : null;
+        setActiveTimeEntry(active);
+        if (activeData.summary && active && String(active.task) === String(task._id)) {
+          setTimeSummary(activeData.summary);
+        }
+      }
+      if (listRes.ok) {
+        const listData = await listRes.json();
+        setTimeEntries(Array.isArray(listData.entries) ? listData.entries : []);
+        if (listData.summary) setTimeSummary(listData.summary);
+      }
+    } catch {
+      /* keep prior state */
+    } finally {
+      setTimeLogLoading(false);
+    }
+  }, [projectId, task._id, isSubtaskView]);
+
+  useEffect(() => {
+    void loadTimeTracking();
+  }, [loadTimeTracking]);
+
   // "On leave" awareness for the assignee picker — best-effort UX warning,
   // refetched whenever the relevant due date changes. The backend still
   // hard-blocks the actual assignment either way.
@@ -998,7 +1110,10 @@ export default function TaskDetailDialog({
     // Details so the dialog never shows a blank pane. Subtasks stays valid
     // in subtask view (it shows that subtask's own nested children), except
     // at the maximum nesting level, where a subtask can't have children.
-    if (isSubtaskView && activeTab === "attachments") {
+    if (
+      isSubtaskView &&
+      (activeTab === "attachments" || activeTab === "time-log")
+    ) {
       setActiveTab("details");
       return;
     }
@@ -1129,31 +1244,112 @@ export default function TaskDetailDialog({
     };
   }, [range, hoverDate, workingDaysConfig]);
 
+  useEffect(() => {
+    setCurrentWorkspaceFields(customFields);
+    setOtherWorkspaceFields(otherCustomFields);
+  }, [customFields, otherCustomFields]);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function refreshCustomFields() {
+      const res = await authFetch(`/projects/${projectId}`);
+      if (!res.ok || cancelled) return;
+      const data = await res.json().catch(() => ({}));
+      if (Array.isArray(data.customFieldDefinitions)) {
+        setCurrentWorkspaceFields(data.customFieldDefinitions);
+      }
+      if (Array.isArray(data.otherWorkspaceCustomFields)) {
+        setOtherWorkspaceFields(data.otherWorkspaceCustomFields);
+      }
+    }
+    void refreshCustomFields();
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, task._id]);
+
+  useEffect(() => {
+    setCustomFieldValues((prev) => {
+      let changed = false;
+      const next = [...prev];
+      const seen = new Set(next.map((row) => row.fieldId));
+      for (const field of taskEditableCustomFields) {
+        if (!seen.has(field.id)) {
+          next.push({
+            fieldId: field.id,
+            value: emptyCustomFieldValue(field.type),
+          });
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [taskEditableCustomFields]);
+
   const loadedDetailIdRef = useRef<string | null>(null);
+
+  const applyLoadedTaskFields = useCallback((full: typeof task) => {
+    setTitle(full.title);
+    setDescription(normalizeDescriptionHtml(full.description));
+    setStatus(full.status);
+    setPriority(full.priority);
+    const taskAssigneeIds = assigneeIdsFromTask(full);
+    setAssigneeIds(taskAssigneeIds);
+    const start = toDateKey(full.startDate);
+    const due = toDateKey(full.dueDate);
+    setStartDate(start);
+    setDueDate(due);
+    const taskWorkingDays = normalizeWorkingDays(full.workingDays);
+    const taskCustomWorkingDays = !isDefaultWorkingDays(taskWorkingDays);
+    setWorkingDaysConfig(taskWorkingDays);
+    setCustomWorkingDays(taskCustomWorkingDays);
+    const hours = resolveDurationHours(
+      full.durationHours,
+      start,
+      due,
+      taskWorkingDays
+    );
+    setDurationTotalHours(hours);
+    setDurationInput(hours != null ? formatDurationDisplay(hours) : "");
+    const taskEffortEnabled = full.effortHours != null && full.effortHours > 0;
+    setEffortHours(full.effortHours ?? null);
+    setEffortInput(
+      full.effortHours != null ? formatEffortDisplay(full.effortHours) : ""
+    );
+    setEffortEnabled(taskEffortEnabled);
+    setRange({
+      from: start ? parseDateKey(start) : undefined,
+      to: due ? parseDateKey(due) : undefined,
+    });
+    setTagsInput((full.tags || []).join(", "));
+    setAttachments(full.attachments || []);
+    setSubtasks(full.subtasks || []);
+    setCustomFieldValues(full.customFieldValues || []);
+
+    hydratingTaskIdRef.current = full._id;
+    setSavedSignature(null);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
 
     async function loadTaskDetail() {
+      if (!projectId || !task._id) return;
       if (loadedDetailIdRef.current === task._id) return;
       loadedDetailIdRef.current = task._id;
 
       const res = await authFetch(`/projects/${projectId}/tasks/${task._id}`);
       if (!res.ok || cancelled) return;
       const full = (await res.json()) as typeof task;
-      // Only enriches locally-held fields (attachments/subtasks need populated
-      // uploader/creator info the lightweight board-list task doesn't have) —
-      // deliberately does NOT call onUpdated, since that would push a board-wide
-      // refresh every time a task dialog is merely opened.
-      setAttachments(full.attachments || []);
-      setSubtasks(full.subtasks || []);
+      if (cancelled) return;
+      applyLoadedTaskFields(full);
     }
 
     loadTaskDetail().catch(() => {});
     return () => {
       cancelled = true;
     };
-  }, [projectId, task._id]);
+  }, [projectId, task._id, applyLoadedTaskFields]);
 
   useEffect(() => {
     async function loadMembers() {
@@ -1208,47 +1404,10 @@ export default function TaskDetailDialog({
   // silently reset in-progress, unsaved text back to the old server value —
   // now that Save is explicit rather than autosaved, that's a real data-loss
   // trap, not just a cosmetic flicker.
+  // Full server detail (loadTaskDetail) re-applies these fields when the
+  // opener only had a partial task (e.g. workload timeline row).
   useEffect(() => {
-    setTitle(task.title);
-    setDescription(normalizeDescriptionHtml(task.description));
-    setStatus(task.status);
-    setPriority(task.priority);
-    const taskAssigneeIds = assigneeIdsFromTask(task);
-    setAssigneeIds(taskAssigneeIds);
-    const start = toDateKey(task.startDate);
-    const due = toDateKey(task.dueDate);
-    setStartDate(start);
-    setDueDate(due);
-    const taskWorkingDays = normalizeWorkingDays(task.workingDays);
-    const taskCustomWorkingDays = !isDefaultWorkingDays(taskWorkingDays);
-    setWorkingDaysConfig(taskWorkingDays);
-    setCustomWorkingDays(taskCustomWorkingDays);
-    const hours = resolveDurationHours(
-      task.durationHours,
-      start,
-      due,
-      taskWorkingDays
-    );
-    setDurationTotalHours(hours);
-    setDurationInput(hours != null ? formatDurationDisplay(hours) : "");
-    const taskEffortEnabled = task.effortHours != null && task.effortHours > 0;
-    setEffortHours(task.effortHours ?? null);
-    setEffortInput(
-      task.effortHours != null ? formatEffortDisplay(task.effortHours) : ""
-    );
-    setEffortEnabled(taskEffortEnabled);
-    setRange({
-      from: start ? parseDateKey(start) : undefined,
-      to: due ? parseDateKey(due) : undefined,
-    });
-    setTagsInput((task.tags || []).join(", "));
-    setAttachments(task.attachments || []);
-    setSubtasks(task.subtasks || []);
-
-    // Hold the dirty baseline open until duration sync + Jodit init settle.
-    // While savedSignature is null, Close will not prompt.
-    hydratingTaskIdRef.current = task._id;
-    setSavedSignature(null);
+    applyLoadedTaskFields(task);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [task._id]);
 
@@ -2141,18 +2300,21 @@ export default function TaskDetailDialog({
       : null;
 
     return {
-      title: title.trim(),
-      description: normalizeDescriptionHtml(description),
-      status,
-      priority,
-      assignees: assigneeIds,
-      startDate: startDate || null,
-      dueDate: dueDate || null,
-      durationHours: hoursToSave,
-      effortHours: effortToSave,
-      workingDays: customWorkingDays ? workingDaysConfig : null,
-      tags,
-    };
+  title: title.trim(),
+  description: normalizeDescriptionHtml(description),
+  status,
+  priority,
+  assignees: assigneeIds,
+  startDate: startDate || null,
+  dueDate: dueDate || null,
+  durationHours: hoursToSave,
+  effortHours: effortToSave,
+  workingDays: customWorkingDays ? workingDaysConfig : null,
+  tags,
+  customFieldValues: customFieldValues.filter((row) =>
+    taskEditableFieldIds.has(row.fieldId)
+  ),
+};
   }, [
     tagsInput,
     durationInput,
@@ -2169,6 +2331,8 @@ export default function TaskDetailDialog({
     dueDate,
     customWorkingDays,
     workingDaysConfig,
+    customFieldValues,
+    taskEditableFieldIds,
   ]);
 
   // A serialized snapshot of the payload. When this differs from the baseline
@@ -2241,6 +2405,16 @@ export default function TaskDetailDialog({
     }
     const updated = await res.json();
     onUpdated(updated);
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(
+        new CustomEvent("tasks-updated", {
+          detail: {
+            taskId: String(task._id),
+            projectId: String(projectId),
+          },
+        })
+      );
+    }
     return { ok: true };
   }, [projectId, task._id, buildTaskPayload, onUpdated]);
 
@@ -2579,6 +2753,16 @@ export default function TaskDetailDialog({
     setDeleting(false);
     if (res.ok) {
       onDeleted(task._id);
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(
+          new CustomEvent("tasks-updated", {
+            detail: {
+              taskId: String(task._id),
+              projectId: String(projectId),
+            },
+          })
+        );
+      }
       onClose();
     }
   };
@@ -2599,6 +2783,91 @@ export default function TaskDetailDialog({
         ? "border-cyan-500 ring-4 ring-cyan-100 dark:border-cyan-500 dark:ring-cyan-500/20"
         : "border-slate-200 hover:border-slate-300 dark:border-slate-700 dark:hover:border-slate-600"
     }`;
+
+  const detailSystemFields = useMemo((): TaskDetailSystemField[] => {
+    const author = task.createdBy;
+    const startLabel = formatCardDateNumeric(startDate || task.startDate);
+    const endLabel = formatCardDateNumeric(dueDate || task.dueDate);
+    const scheduleLabel = formatScheduleDisplayNumeric(
+      startDate || task.startDate,
+      dueDate || task.dueDate
+    );
+    const effortValue = effortEnabled
+      ? formatEffortHours(parseEffortInput(effortInput) ?? effortHours)
+      : null;
+    const openSchedule = canEdit
+      ? () => setScheduleCalendarOpen(true)
+      : undefined;
+
+    return [
+      {
+        id: "author",
+        label: "Author",
+        empty: !author?.username,
+        display: author?.username ? (
+          <span className="inline-flex items-center gap-1.5 min-w-0">
+            <span
+              className={`w-5 h-5 rounded-md shrink-0 ${avatarBg(author.avatarColor, author._id || author.username).className} flex items-center justify-center text-[9px] font-bold text-white`}
+              style={
+                avatarBg(author.avatarColor, author._id || author.username).style
+              }
+            >
+              {avatarInitials(author.username)}
+            </span>
+            <span className="truncate">{author.username}</span>
+          </span>
+        ) : null,
+      },
+      {
+        id: "startDate",
+        label: "Start date",
+        empty: !startLabel,
+        display: startLabel,
+        onClick: openSchedule,
+      },
+      {
+        id: "endDate",
+        label: "End date",
+        empty: !endLabel,
+        display: endLabel,
+        onClick: openSchedule,
+      },
+      {
+        id: "schedule",
+        label: "Schedule",
+        empty: !scheduleLabel,
+        display: scheduleLabel,
+        onClick: openSchedule,
+      },
+      {
+        id: "effort",
+        label: "Effort",
+        empty: !effortValue,
+        display: effortValue,
+        onClick: canEdit
+          ? () => {
+              if (!effortEnabled) handleEffortToggle(true);
+            }
+          : undefined,
+      },
+      {
+        id: "itemType",
+        label: "Task type",
+        empty: false,
+        display: "Task",
+      },
+    ];
+  }, [
+    task.createdBy,
+    task.startDate,
+    task.dueDate,
+    startDate,
+    dueDate,
+    effortEnabled,
+    effortInput,
+    effortHours,
+    canEdit,
+  ]);
 
   return (
     <ModalShell onClose={handleClose} maxWidth="5xl" className="flex h-[94vh] max-h-[94vh] flex-col overflow-hidden">
@@ -2939,6 +3208,25 @@ export default function TaskDetailDialog({
                 </p>
               )}
             </div>
+
+            {!isSubtaskView && (
+              <TaskTimerControls
+                projectId={projectId}
+                taskId={task._id}
+                status={status}
+                dueDate={dueDate}
+                effortHours={effortEnabled ? effortHours : null}
+                canEdit={canEdit}
+                activeEntry={activeTimeEntry}
+                summary={timeSummary}
+                onActiveChange={setActiveTimeEntry}
+                onSummaryChange={setTimeSummary}
+                onEntriesMaybeChanged={() => {
+                  void loadTimeTracking();
+                  void loadActivity();
+                }}
+              />
+            )}
           </div>
 
           <div className="sm:hidden mt-3 flex items-center gap-1.5 bg-slate-50 border border-slate-200 rounded-lg px-2 py-2 dark:bg-slate-800 dark:border-slate-700">
@@ -2954,9 +3242,8 @@ export default function TaskDetailDialog({
           </div>
         </div>
 
-        {/* Summary — assignees, tags, schedule, effort, progress. Always
-            visible regardless of the active tab below (previously these
-            lived inside the Details tab body). */}
+        {/* Summary — schedule & effort. Always visible regardless of the
+            active tab below. */}
         <div className="shrink-0 border-b border-slate-200 px-6 py-5 space-y-5 dark:border-slate-800">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-5 items-stretch">
             {/* Schedule: compact summary card that opens a calendar popover */}
@@ -3223,6 +3510,32 @@ export default function TaskDetailDialog({
           </div>
         </div>
 
+        {/* Fields grid — default system fields + custom fields, below schedule */}
+        {!isSubtaskView && (
+          <div className="shrink-0 border-b border-slate-200 px-6 py-4 dark:border-slate-800">
+            <TaskCustomFields
+              fields={taskDetailCustomFields}
+              values={customFieldValues}
+              canEdit={canEdit}
+              projectId={projectId}
+              organizationId={organizationId}
+              systemFields={detailSystemFields}
+              onChange={setCustomFieldValues}
+              onFieldCreated={(field) => {
+                setCurrentWorkspaceFields((current) => {
+                  if (current.some((row) => row.id === field.id)) {
+                    return current.map((row) =>
+                      row.id === field.id ? field : row
+                    );
+                  }
+                  return [...current, field];
+                });
+                onCustomFieldCreated?.(field);
+              }}
+            />
+          </div>
+        )}
+
         {/* Tab bar */}
         <div className="shrink-0 border-b border-slate-200 px-6 flex items-center gap-1 overflow-hidden dark:border-slate-800">
           {(
@@ -3243,6 +3556,15 @@ export default function TaskDetailDialog({
                 : []),
               ...(!isSubtaskView
                 ? [{ id: "attachments" as const, label: "Attachments", count: attachments.length }]
+                : []),
+              ...(!isSubtaskView
+                ? [
+                    {
+                      id: "time-log" as const,
+                      label: "Time Log",
+                      count: timeEntries.filter((e) => e.status !== "running").length,
+                    },
+                  ]
                 : []),
               { id: "activity" as const, label: "Activity", count: activityFeed.length },
             ]
@@ -3276,93 +3598,128 @@ export default function TaskDetailDialog({
         {/* Body */}
         <div className="flex-1 min-h-0 overflow-y-auto task-detail-thin-scroll px-6 py-5">
         <div className="space-y-6 flex flex-col h-full">
-          {activeTab === "details" && (
-          <div className="flex-1 flex flex-col min-h-0">
-            <SectionLabel>Description</SectionLabel>
-            <div className="flex-1 flex flex-col min-h-[132px] rounded-xl border border-slate-200 bg-slate-50 transition-colors focus-within:border-cyan-400 focus-within:bg-white overflow-hidden dark:border-slate-700 dark:bg-slate-800 dark:focus-within:border-cyan-500 dark:focus-within:bg-slate-800">
-              {showDescriptionEditor && !isSubtaskView && (
-                <div className="shrink-0 flex items-center justify-end gap-1 px-2 py-1.5 border-b border-slate-200/80 dark:border-slate-700/80">
-                  <button
-                    type="button"
-                    onClick={() => descriptionFileRef.current?.click()}
-                    disabled={descriptionUploading || !canEdit}
-                    className="btn btn-ghost btn-sm !h-7 !w-7 !px-0 hover:text-cyan-700 disabled:opacity-40 dark:hover:text-cyan-400"
-                    title="Attach image"
-                  >
-                    <Paperclip size={14} />
-                  </button>
-                  <input
-                    ref={descriptionFileRef}
-                    type="file"
-                    accept="image/*"
-                    className="hidden"
-                    onChange={(e) => {
-                      const file = e.target.files?.[0];
-                      if (file) uploadDescriptionAttachment(file);
-                      e.target.value = "";
-                    }}
-                  />
-                </div>
-              )}
-              {showDescriptionEditor ? (
-                <div className="relative z-0 flex-1 min-h-[100px] min-w-0 overflow-hidden">
-                  <JoditDescriptionEditor
-                    value={activeDescriptionValue}
-                    onChange={(html) =>
-                      isSubtaskView ? setSubtaskDescription(html) : setDescription(html)
-                    }
-                    disabled={!canEdit || (isSubtaskView && subtaskSaving)}
-                    placeholder="Add a description..."
-                  />
-                </div>
-              ) : activeDescriptionValue ? (
-                <div
-                  className={DESCRIPTION_READ_VIEW_CLASS}
-                  dangerouslySetInnerHTML={{
-                    __html: DOMPurify.sanitize(activeDescriptionValue),
-                  }}
-                />
-              ) : (
-                <div className={DESCRIPTION_READ_VIEW_CLASS}>
-                  <span className="text-slate-400 dark:text-slate-500">
-                    Add a description...
-                  </span>
-                </div>
-              )}
-              {!isSubtaskView && descriptionImagePreviews.length > 0 && (
-                <div className="relative z-10 shrink-0 clear-both flex flex-wrap gap-2 px-3 py-2.5 border-t border-slate-200/80 bg-slate-50 dark:border-slate-700/80 dark:bg-slate-800/80">
-                  {descriptionImagePreviews.map((img) => (
-                    <div key={img.id} className="group relative shrink-0">
-                      <img
-                        src={img.url}
-                        alt={img.name}
-                        onClick={() =>
-                          !img.id.startsWith("temp-") &&
-                          viewAttachment(img.id, img.name, "image/*")
-                        }
-                        className={`h-16 w-16 rounded-lg object-cover border border-slate-200 dark:border-slate-700 ${
-                          img.id.startsWith("temp-") ? "" : "cursor-pointer hover:opacity-90"
-                        }`}
-                        title={img.id.startsWith("temp-") ? undefined : "Click to expand"}
-                      />
-                      {canEdit && (
-                        <button
-                          type="button"
-                          onClick={() => removeDescriptionImage(img.id)}
-                          className="absolute -top-1.5 -right-1.5 hidden h-4.5 w-4.5 items-center justify-center rounded-full bg-slate-700 text-white group-hover:flex dark:bg-slate-600"
-                          title="Remove image"
-                        >
-                          <X size={10} />
-                        </button>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          </div>
-          )}
+         {activeTab === "details" && (
+  <>
+    <div className="flex-1 flex flex-col min-h-0">
+      <SectionLabel>Description</SectionLabel>
 
+      <div className="flex-1 flex flex-col min-h-[132px] rounded-xl border border-slate-200 bg-slate-50 transition-colors focus-within:border-cyan-400 focus-within:bg-white overflow-hidden dark:border-slate-700 dark:bg-slate-800 dark:focus-within:border-cyan-500 dark:focus-within:bg-slate-800">
+
+        {showDescriptionEditor && !isSubtaskView && (
+          <div className="shrink-0 flex items-center justify-end gap-1 px-2 py-1.5 border-b border-slate-200/80 dark:border-slate-700/80">
+            <button
+              type="button"
+              onClick={() => descriptionFileRef.current?.click()}
+              disabled={descriptionUploading || !canEdit}
+              className="btn btn-ghost btn-sm !h-7 !w-7 !px-0 hover:text-cyan-700 disabled:opacity-40 dark:hover:text-cyan-400"
+              title="Attach image"
+            >
+              <Paperclip size={14} />
+            </button>
+
+            <input
+              ref={descriptionFileRef}
+              type="file"
+              accept="image/*"
+              className="hidden"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+
+                if (file) {
+                  uploadDescriptionAttachment(file);
+                }
+
+                e.target.value = "";
+              }}
+            />
+          </div>
+          
+        )}
+
+        {showDescriptionEditor ? (
+          <div className="relative z-0 flex-1 min-h-[100px] min-w-0 overflow-hidden">
+            <JoditDescriptionEditor
+              value={activeDescriptionValue}
+              onChange={(html) =>
+                isSubtaskView
+                  ? setSubtaskDescription(html)
+                  : setDescription(html)
+              }
+              disabled={
+                !canEdit ||
+                (isSubtaskView && subtaskSaving)
+              }
+              placeholder="Add a description..."
+            />
+          </div>
+        ) : activeDescriptionValue ? (
+          <div
+            className={DESCRIPTION_READ_VIEW_CLASS}
+            dangerouslySetInnerHTML={{
+              __html: DOMPurify.sanitize(
+                activeDescriptionValue
+              ),
+            }}
+          />
+        ) : (
+          <div className={DESCRIPTION_READ_VIEW_CLASS}>
+            <span className="text-slate-400 dark:text-slate-500">
+              Add a description...
+            </span>
+          </div>
+        )}
+
+        {!isSubtaskView &&
+          descriptionImagePreviews.length > 0 && (
+            <div className="relative z-10 shrink-0 clear-both flex flex-wrap gap-2 px-3 py-2.5 border-t border-slate-200/80 bg-slate-50 dark:border-slate-700/80 dark:bg-slate-800/80">
+              {descriptionImagePreviews.map((img) => (
+                <div
+                  key={img.id}
+                  className="group relative shrink-0"
+                >
+                  <img
+                    src={img.url}
+                    alt={img.name}
+                    onClick={() =>
+                      !img.id.startsWith("temp-") &&
+                      viewAttachment(
+                        img.id,
+                        img.name,
+                        "image/*"
+                      )
+                    }
+                    className={`h-16 w-16 rounded-lg object-cover border border-slate-200 dark:border-slate-700 ${
+                      img.id.startsWith("temp-")
+                        ? ""
+                        : "cursor-pointer hover:opacity-90"
+                    }`}
+                    title={
+                      img.id.startsWith("temp-")
+                        ? undefined
+                        : "Click to expand"
+                    }
+                  />
+
+                  {canEdit && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        removeDescriptionImage(img.id)
+                      }
+                      className="absolute -top-1.5 -right-1.5 hidden h-4.5 w-4.5 items-center justify-center rounded-full bg-slate-700 text-white group-hover:flex dark:bg-slate-600"
+                      title="Remove image"
+                    >
+                      <X size={10} />
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+            )}
+        </div>
+      </div>
+    </>
+)}
           {isSubtaskView && activeTab === "subtasks" && activeSubtask && (() => {
             const level = subtaskLevelOf(activeSubtask, subtasks);
             const children = subtasks.filter(
@@ -3624,6 +3981,7 @@ export default function TaskDetailDialog({
           })()}
 
           {!isSubtaskView && activeTab === "attachments" && (
+
           <div>
             <SectionLabel
               icon={Paperclip}
@@ -3722,6 +4080,14 @@ export default function TaskDetailDialog({
           </div>
           )}
 
+          {!isSubtaskView && activeTab === "time-log" && (
+            <TaskTimeLogPanel
+              entries={timeEntries}
+              summary={timeSummary}
+              loading={timeLogLoading}
+            />
+          )}
+
           {activeTab === "activity" && (
           <div className="space-y-4">
           {/* Same description field/state as the Details tab — editing it
@@ -3810,7 +4176,7 @@ export default function TaskDetailDialog({
               )}
             </div>
           </div>
-          <div className="flex flex-col bg-white border border-slate-200 rounded-xl overflow-hidden dark:bg-slate-900 dark:border-slate-800" style={{ height: "min(60vh, 520px)" }}>
+          <div className="flex flex-col min-h-[320px] max-h-[min(62vh,560px)] bg-white border border-slate-200 rounded-xl overflow-hidden dark:bg-slate-900 dark:border-slate-800">
             <div className="flex-1 min-h-0 overflow-y-auto task-detail-thin-scroll p-4">
                 {activityLoading ? (
                   <p className="text-sm text-slate-500 text-center py-8 dark:text-slate-400">
@@ -3857,7 +4223,7 @@ export default function TaskDetailDialog({
                                 </span>
                                 <span className="text-[10px] text-slate-400 ml-auto shrink-0 dark:text-slate-500">
                                   {formatActivityTime(item.createdAt)}
-                                  {item.editedAt && " · edited"}
+                                  {item.editedAt && "  ·  edited"}
                                 </span>
                                 {canEditComment(item) && editingCommentId !== item.id && (
                                   <button
@@ -3968,6 +4334,7 @@ export default function TaskDetailDialog({
                       const name = item.actor?.username || "System";
                       const style = getActivityEventStyle(item.action);
                       const Icon = getActivityEventIcon(item.action);
+                      const isDescriptionChange = item.action === "description_changed";
 
                       return (
                         <div key={item.id} className="flex gap-3 pb-4">
@@ -3983,13 +4350,28 @@ export default function TaskDetailDialog({
                           </div>
                           <div className="flex-1 min-w-0 pb-1">
                             <div className="flex flex-wrap items-start gap-x-2 gap-y-1">
-                              <p className="text-sm text-slate-700 flex-1 min-w-0 dark:text-slate-200">
-                                <span className="font-medium text-slate-900 dark:text-slate-100">
-                                  {name}
-                                </span>
-                                <span className="text-slate-500 dark:text-slate-400"> </span>
-                                <span>{item.message}</span>
-                              </p>
+                              {isDescriptionChange ? (
+                                <button
+                                  type="button"
+                                  onClick={() => setDescriptionChangeItem(item)}
+                                  className="text-sm text-slate-700 flex-1 min-w-0 text-left hover:underline decoration-dotted underline-offset-2 dark:text-slate-200"
+                                  title="View description changes"
+                                >
+                                  <span className="font-medium text-slate-900 dark:text-slate-100">
+                                    {name}
+                                  </span>
+                                  <span className="text-slate-500 dark:text-slate-400"> </span>
+                                  <span>{item.message}</span>
+                                </button>
+                              ) : (
+                                <p className="text-sm text-slate-700 flex-1 min-w-0 dark:text-slate-200">
+                                  <span className="font-medium text-slate-900 dark:text-slate-100">
+                                    {name}
+                                  </span>
+                                  <span className="text-slate-500 dark:text-slate-400"> </span>
+                                  <span>{item.message}</span>
+                                </p>
+                              )}
                               <span className="text-[10px] text-slate-400 shrink-0 dark:text-slate-500">
                                 {formatActivityTime(item.createdAt)}
                               </span>
@@ -4064,7 +4446,7 @@ export default function TaskDetailDialog({
                           }
                           className="text-slate-500 hover:text-red-500 ml-1 dark:text-slate-400 dark:hover:text-red-400"
                         >
-                          ×
+                          ├ù
                         </button>
                       </span>
                     ))}
@@ -4165,8 +4547,9 @@ export default function TaskDetailDialog({
             </div>
           </div>
           )}
+
         </div>
-        </div>
+      </div>
 
         {/* Footer toolbar — delete on the left, close/save on the right */}
         <div className="shrink-0 border-t border-slate-200 bg-slate-50 rounded-b-2xl px-6 py-4 dark:border-slate-800 dark:bg-slate-800">
@@ -4319,6 +4702,26 @@ export default function TaskDetailDialog({
             </div>
           </div>
         </div>
+      )}
+
+      {descriptionChangeItem && (
+        <DescriptionChangeViewer
+          previousDescription={descriptionChangeItem.meta?.previousDescription ?? null}
+          newDescription={descriptionChangeItem.meta?.newDescription ?? null}
+          editors={
+            descriptionChangeItem.actor
+              ? [
+                  {
+                    id: descriptionChangeItem.actor._id,
+                    name: descriptionChangeItem.actor.username || "System",
+                    avatarColor: descriptionChangeItem.actor.avatarColor,
+                  },
+                ]
+              : []
+          }
+          timestamp={descriptionChangeItem.createdAt}
+          onClose={() => setDescriptionChangeItem(null)}
+        />
       )}
     </ModalShell>
   );

@@ -45,6 +45,43 @@ const {
   orgRoleIdToProjectMemberRole,
   projectMemberRoleToOrgRoleId,
 } = require("../utils/roleDefinitions");
+const {
+  createDefaultCardPreviewConfig,
+  normalizeCardPreviewConfig,
+} = require("../utils/kanbanCardPreview");
+const {
+  getWorkspaceCustomFieldDefinitions,
+  getProjectCustomFieldDefinitionsGrouped,
+  getTaskEditableCustomFieldDefinitions,
+  createWorkspaceCustomField,
+  deleteWorkspaceCustomField,
+  adoptCustomFieldOnProject,
+} = require("../utils/customFields");
+const { backfillLegacyProjectWorkspaces } = require("../utils/workspaces");
+const {
+  HierarchyError,
+  resolveCreateLocation,
+  buildProjectTree,
+  pruneProjectTreeForViewer,
+  resolveProjectTreeDocuments,
+  resolveContainerWorkspace,
+} = require("../utils/projectHierarchy");
+const {
+  ProjectTrashError,
+  moveProjectTreesToTrash,
+} = require("../utils/projectTrash");
+
+async function projectCustomFieldsPayload(project) {
+  const grouped = await getProjectCustomFieldDefinitionsGrouped(project);
+  const editableCustomFieldDefinitions =
+    await getTaskEditableCustomFieldDefinitions(project);
+  return {
+    customFieldDefinitions: grouped.currentWorkspaceFields,
+    otherWorkspaceCustomFields: grouped.otherWorkspaceFields,
+    editableCustomFieldDefinitions,
+    projectWorkspaceId: grouped.projectWorkspaceId,
+  };
+}
 
 /** Add or update org membership using the canonical org role id. */
 async function syncOrgMembership(project, userId, orgRoleId) {
@@ -73,6 +110,71 @@ async function syncOrgMembership(project, userId, orgRoleId) {
   await organization.save();
 }
 
+const BILLING_VALUES = ["billable", "non_billable"];
+
+/*
+ * Shared by createProject/updateProject — normalizes and validates
+ * startDate/dueDate/billing/budget from req.body. Every field is
+ * optional; only present keys are validated/returned, so a partial
+ * update (e.g. just changing budget) doesn't require the others.
+ * Returns { error } on the first invalid field, otherwise the
+ * normalized values ready to assign onto a Project document.
+ */
+function parseScheduleAndBudget(body) {
+  const result = {};
+
+  if (body.startDate !== undefined) {
+    if (body.startDate === null || body.startDate === "") {
+      result.startDate = null;
+    } else {
+      const parsed = new Date(body.startDate);
+      if (Number.isNaN(parsed.getTime())) {
+        return { error: "Start date is invalid." };
+      }
+      result.startDate = parsed;
+    }
+  }
+
+  if (body.dueDate !== undefined) {
+    if (body.dueDate === null || body.dueDate === "") {
+      result.dueDate = null;
+    } else {
+      const parsed = new Date(body.dueDate);
+      if (Number.isNaN(parsed.getTime())) {
+        return { error: "Due date is invalid." };
+      }
+      result.dueDate = parsed;
+    }
+  }
+
+  if (result.startDate && result.dueDate && result.dueDate < result.startDate) {
+    return { error: "Due date cannot be earlier than start date." };
+  }
+
+  if (body.billing !== undefined) {
+    if (!BILLING_VALUES.includes(body.billing)) {
+      return {
+        error: `Billing must be one of: ${BILLING_VALUES.join(", ")}.`,
+      };
+    }
+    result.billing = body.billing;
+  }
+
+  if (body.budget !== undefined) {
+    if (body.budget === null || body.budget === "") {
+      result.budget = null;
+    } else {
+      const parsed = Number(body.budget);
+      if (!Number.isFinite(parsed) || parsed < 0) {
+        return { error: "Budget must be a number that is 0 or greater." };
+      }
+      result.budget = parsed;
+    }
+  }
+
+  return { result };
+}
+
 // ─────────────────────────────────────────────────────────────
 // CREATE PROJECT
 // POST /api/projects
@@ -81,16 +183,47 @@ async function syncOrgMembership(project, userId, orgRoleId) {
 // ─────────────────────────────────────────────────────────────
 const createProject = async (req, res) => {
   try {
-    const { title, description, organizationId } = req.body;
+    const { title, description } = req.body;
 
     if (!title) {
       return res.status(400).json({ message: "Title is required" });
     }
 
-    const userId = req.user._id;
-    let members = [{ user: userId, role: "owner" }];
+    const { result: scheduleAndBudget, error: scheduleError } =
+      parseScheduleAndBudget(req.body);
+    if (scheduleError) {
+      return res.status(400).json({ message: scheduleError });
+    }
 
-    if (organizationId) {
+    const userId = req.user._id;
+    let location;
+    try {
+      location = await resolveCreateLocation(userId, req.body);
+    } catch (err) {
+      if (err instanceof HierarchyError) {
+        return res.status(err.status).json({ message: err.message });
+      }
+      throw err;
+    }
+
+    const organizationId = location.organizationId || null;
+    let members = location.members || [{ user: userId, role: "owner" }];
+    let resolvedWorkspaceId = location.workspaceId || null;
+
+    const {
+      getWorkspaceForUser,
+      resolveDefaultWorkspaceId,
+    } = require("../utils/workspaces");
+
+    if (resolvedWorkspaceId) {
+      const ws = await getWorkspaceForUser(userId, resolvedWorkspaceId);
+      if (!ws) {
+        return res.status(400).json({ message: "Invalid workspace" });
+      }
+      resolvedWorkspaceId = ws._id;
+    }
+
+    if (organizationId && !location.skipOrgCreateCheck) {
       const organization = await Organization.findById(organizationId);
       if (!organization) {
         return res.status(404).json({ message: "Organization not found" });
@@ -106,15 +239,29 @@ const createProject = async (req, res) => {
         });
       }
 
-      members = buildOrgProjectMembers(organization, userId);
+      if (!location.members) {
+        members = buildOrgProjectMembers(organization, userId);
+      }
+    }
+
+    if (!resolvedWorkspaceId) {
+      resolvedWorkspaceId = await resolveDefaultWorkspaceId(userId, {
+        organizationId: organizationId || null,
+        workspaceId: req.body.workspaceId || null,
+      });
     }
 
     const project = await Project.create({
       title,
       description,
       organization: organizationId || null,
+      workspace: resolvedWorkspaceId,
+      folder: location.folderId || null,
+      workspaceFile: location.fileId || null,
+      parentProject: location.parentProjectId || null,
       owner: userId,
       members,
+      ...scheduleAndBudget,
     });
 
     const populated = await Project.findById(project._id)
@@ -141,11 +288,17 @@ const createProject = async (req, res) => {
 const getProjects = async (req, res) => {
   try {
     const userId = req.user._id;
-    const { organizationId, personal } = req.query;
+    const { organizationId, personal, workspaceId } = req.query;
+
+    await backfillLegacyProjectWorkspaces(userId, {
+      organizationId,
+      personal,
+    });
 
     const result = await buildProjectListFilter(userId, {
       organizationId,
       personal,
+      workspaceId,
     });
 
     if (result.error) {
@@ -154,11 +307,13 @@ const getProjects = async (req, res) => {
         .json({ message: result.error.message });
     }
 
-    const projects = await Project.find({
-  ...result.filter,
-  isDeleted: { $ne: true },
-  status: { $ne: "archived" },
-})
+    const filter = {
+      ...result.filter,
+      isDeleted: { $ne: true },
+      status: { $ne: "archived" },
+    };
+
+    const projects = await Project.find(filter)
   .populate("owner", "username email avatarColor")
   .populate("organization", "name slug");
 
@@ -175,6 +330,111 @@ const getProjects = async (req, res) => {
     );
 
     res.json(projectsWithRole);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────
+// GET PROJECT TREE
+// GET /api/projects/tree
+// Nested folders → projects → subprojects, files → projects.
+// Does not change GET /api/projects (still a flat list).
+// ─────────────────────────────────────────────────────────────
+const getProjectTree = async (req, res) => {
+  try {
+    const userId = req.user._id;
+    const { organizationId, personal, workspaceId } = req.query;
+
+    await backfillLegacyProjectWorkspaces(userId, {
+      organizationId,
+      personal,
+    });
+
+    const result = await buildProjectListFilter(userId, {
+      organizationId,
+      personal,
+      workspaceId,
+    });
+
+    if (result.error) {
+      return res
+        .status(result.error.status)
+        .json({ message: result.error.message });
+    }
+
+    const filter = {
+      ...result.filter,
+      isDeleted: { $ne: true },
+      status: { $ne: "archived" },
+    };
+
+    const memberProjects = await Project.find(filter).select(
+      "title folder workspaceFile parentProject order owner members organization"
+    );
+
+    const memberProjectIds = memberProjects.map((p) => String(p._id));
+
+    // Per-project "can Edit this project" — reuses the same project:update
+    // permission the PUT /:projectId route itself enforces, so the 3-dot
+    // menu's Edit option only ever appears where the backend would also
+    // accept the edit.
+    const editableProjectIds = (
+      await Promise.all(
+        memberProjects.map(async (p) => {
+          const permissions = await resolveEffectiveProjectPermissions(
+            p,
+            userId
+          );
+          return userHasProjectPermission(permissions, "project:update")
+            ? String(p._id)
+            : null;
+        })
+      )
+    ).filter(Boolean);
+
+    let canManageTree =
+      personal === "true" || personal === true || !organizationId;
+    if (!canManageTree && organizationId) {
+      const organization = await Organization.findById(organizationId);
+      if (organization) {
+        ensureRoleDefinitions(organization);
+        canManageTree = hasOrgPermissionForUser(
+          organization,
+          userId,
+          "org:createProject"
+        );
+      }
+    }
+
+    let resolvedWorkspaceId = workspaceId || null;
+    if (canManageTree) {
+      try {
+        const scope = await resolveContainerWorkspace(userId, {
+          organizationId,
+          workspaceId,
+          personal,
+        });
+        resolvedWorkspaceId = scope.workspaceId;
+      } catch {
+        resolvedWorkspaceId = workspaceId || null;
+      }
+    }
+
+    const { projects, folders } = await resolveProjectTreeDocuments(
+      memberProjects,
+      {
+        workspaceId: resolvedWorkspaceId,
+        includeAllWorkspaceFolders: canManageTree,
+      }
+    );
+
+    const tree = buildProjectTree(folders, [], projects);
+    res.json({
+      ...pruneProjectTreeForViewer(tree, { keepEmptyFolders: canManageTree }),
+      memberProjectIds,
+      editableProjectIds,
+    });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -220,6 +480,8 @@ const getProject = async (req, res) => {
       createdBy: project.owner,
       myRole: await resolveProjectRoleForUser(project, userId),
       myPermissions: await resolveEffectiveProjectPermissions(project, userId),
+      cardPreviewConfig: normalizeCardPreviewConfig(project.cardPreviewConfig),
+      ...(await projectCustomFieldsPayload(project)),
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -257,12 +519,47 @@ const updateProject = async (req, res) => {
     const userId = req.user._id;
     const permissions = await resolveEffectiveProjectPermissions(project, userId);
 
-    const { title, description, status, customStatuses } = req.body;
+    const { title, description, status, customStatuses, cardPreviewConfig } = req.body;
     const updates = {};
+    let newlyEnabledCustomFieldIds = [];
 
     if (title !== undefined) updates.title = title;
     if (description !== undefined) updates.description = description;
     if (status !== undefined) updates.status = status;
+
+    const { result: scheduleAndBudget, error: scheduleError } =
+      parseScheduleAndBudget(req.body);
+    if (scheduleError) {
+      return res.status(400).json({ message: scheduleError });
+    }
+
+    if (scheduleAndBudget) {
+      // Partial updates (e.g. only dueDate changes) must still be checked
+      // against whichever date ISN'T being changed in this request.
+      const effectiveStart =
+        "startDate" in scheduleAndBudget
+          ? scheduleAndBudget.startDate
+          : project.startDate;
+      const effectiveDue =
+        "dueDate" in scheduleAndBudget ? scheduleAndBudget.dueDate : project.dueDate;
+
+      if (effectiveStart && effectiveDue && effectiveDue < effectiveStart) {
+        return res.status(400).json({
+          message: "Due date cannot be earlier than start date.",
+        });
+      }
+
+      Object.assign(updates, scheduleAndBudget);
+    }
+
+    if (cardPreviewConfig !== undefined) {
+      const normalized = normalizeCardPreviewConfig(cardPreviewConfig);
+      updates.cardPreviewConfig = normalized;
+      const oldCustom = project.cardPreviewConfig?.customFields || {};
+      newlyEnabledCustomFieldIds = Object.keys(normalized.customFields).filter(
+        (fieldId) => normalized.customFields[fieldId] && !oldCustom[fieldId]
+      );
+    }
 
     if (customStatuses !== undefined) {
       const normalized = normalizeCustomStatuses(customStatuses);
@@ -309,7 +606,26 @@ const updateProject = async (req, res) => {
       { new: true }
     );
 
-    res.json(updated);
+    if (newlyEnabledCustomFieldIds.length > 0) {
+      const grouped = await getProjectCustomFieldDefinitionsGrouped(updated);
+      const allFields = [
+        ...grouped.currentWorkspaceFields,
+        ...grouped.otherWorkspaceFields,
+      ];
+      const byId = new Map(allFields.map((field) => [field.id, field]));
+      for (const fieldId of newlyEnabledCustomFieldIds) {
+        const definition = byId.get(fieldId);
+        if (definition) {
+          await adoptCustomFieldOnProject(updated, definition);
+        }
+      }
+    }
+
+    res.json({
+      ...updated.toObject(),
+      cardPreviewConfig: normalizeCardPreviewConfig(updated.cardPreviewConfig),
+      ...(await projectCustomFieldsPayload(updated)),
+    });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -329,39 +645,20 @@ const moveProjectToTrash = async (req, res) => {
     }
 
     const userId = req.user._id;
-    const role = project.getMemberRole(userId);
+    const { trashed } = await moveProjectTreesToTrash([project._id], userId, {
+      requireOwner: true,
+      assertOwnership: true,
+    });
 
-    if (role !== "owner") {
-      return res.status(403).json({ message: "Only the project owner can move it to trash" });
+    if (!trashed) {
+      return res.status(400).json({ message: "Project is already in trash" });
     }
-
-    const deletedAt = new Date();
-    project.isDeleted = true;
-    project.deletedAt = deletedAt;
-    await project.save();
-
-    await Task.updateMany(
-  {
-    project: project._id,
-    isDeleted: { $ne: true },
-  },
-  {
-    isDeleted: true,
-    isActive: false,
-    deletedAt,
-  }
-);
-
-    await CalendarEvent.deleteMany({
-  taskRef: {
-    $in: (
-      await Task.find({ project: project._id }).select("_id")
-    ).map((t) => t._id),
-  },
-});
 
     res.json({ message: "Project moved to trash" });
   } catch (error) {
+    if (error instanceof ProjectTrashError) {
+      return res.status(error.status).json({ message: error.message });
+    }
     res.status(500).json({ message: error.message });
   }
 };
@@ -986,9 +1283,87 @@ const resendProjectInvitation = async (req, res) => {
   }
 };
 
+const createCustomField = async (req, res) => {
+  try {
+    const project = await Project.findById(req.params.projectId);
+    if (!project) return res.status(404).json({ message: "Project not found" });
+
+    const {
+      name,
+      type,
+      options,
+      description,
+      organizationIds,
+      includePersonal,
+      spaceType,
+      spaceId,
+      workspaceId,
+      numberConfig,
+      permissions,
+      scope,
+    } = req.body || {};
+    const definition = await createWorkspaceCustomField(project, {
+      name,
+      type,
+      options,
+      description,
+      organizationIds,
+      includePersonal,
+      spaceType,
+      spaceId,
+      workspaceId,
+      numberConfig,
+      permissions,
+      scope,
+      actorUserId: req.user._id,
+    });
+    await adoptCustomFieldOnProject(project, definition);
+
+    res.status(201).json({
+      field: definition,
+      ...(await projectCustomFieldsPayload(project)),
+    });
+  } catch (error) {
+    res.status(400).json({ message: error.message });
+  }
+};
+
+const deleteCustomField = async (req, res) => {
+  try {
+    const project = await Project.findById(req.params.projectId);
+    if (!project) return res.status(404).json({ message: "Project not found" });
+
+    const fieldId = req.params.fieldId;
+    await deleteWorkspaceCustomField(project, fieldId, req.user._id);
+
+    project.adoptedCustomFieldIds = (project.adoptedCustomFieldIds || []).filter(
+      (id) => id !== fieldId
+    );
+    if (project.cardPreviewConfig?.customFields?.[fieldId] !== undefined) {
+      const nextCustomFields = { ...(project.cardPreviewConfig.customFields || {}) };
+      delete nextCustomFields[fieldId];
+      project.cardPreviewConfig.customFields = nextCustomFields;
+    }
+    await project.save();
+
+    await Task.updateMany(
+      { project: project._id },
+      { $pull: { customFieldValues: { fieldId } } }
+    );
+
+    res.json({
+      message: "Custom field deleted",
+      ...(await projectCustomFieldsPayload(project)),
+    });
+  } catch (error) {
+    res.status(400).json({ message: error.message });
+  }
+};
+
 module.exports = {
   createProject,
   getProjects,
+  getProjectTree,
   getProject,
   updateProject,
   deleteProject,
@@ -1001,4 +1376,6 @@ module.exports = {
   removeMember,
   changeMemberRole,
   getProjectMembers,
+  createCustomField,
+  deleteCustomField,
 };

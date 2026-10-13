@@ -1,4 +1,10 @@
 import { authFetch } from "@/lib/validation/authFetch";
+import { appendWorkspaceScope } from "@/lib/workspaceStorage";
+
+export type SearchScope = {
+  organizationId?: string | null;
+  personal?: boolean;
+};
 
 export type SearchProject = {
   _id: string;
@@ -64,15 +70,23 @@ export function countSearchResults(results: SearchResults) {
 export async function fetchSearchResults(
   query: string,
   limit = 5,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  scope?: SearchScope
 ): Promise<SearchResults> {
   const q = query.trim();
   if (!q) return { ...EMPTY_SEARCH_RESULTS, query: "" };
 
-  const res = await authFetch(
-    `/search?q=${encodeURIComponent(q)}&limit=${limit}`,
-    { signal }
-  );
+  const params = new URLSearchParams();
+  params.set("q", q);
+  params.set("limit", String(limit));
+  if (scope?.organizationId) {
+    params.set("organizationId", scope.organizationId);
+  } else if (scope?.personal) {
+    params.set("personal", "true");
+  }
+  appendWorkspaceScope(params);
+
+  const res = await authFetch(`/search?${params.toString()}`, { signal });
 
   if (!res.ok) {
     throw new Error("Search failed");

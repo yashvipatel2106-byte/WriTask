@@ -1,5 +1,25 @@
 const crypto = require("crypto");
+const fs = require("fs");
+
+// Invitation tokens are stored only as this hash (never the raw value); the
+// raw token lives only in the emailed URL and in the API request/response
+// at creation time, same shape as the OrganizationInvitation.token string
+// field so no schema/migration change is needed.
+function hashInviteToken(rawToken) {
+  return crypto.createHash("sha256").update(String(rawToken)).digest("hex");
+}
+
 const Organization = require("../models/Organization");
+const {
+  ensureOrganizationHolidays,
+} = require("../services/holidayService");
+const { orgLogoPath, deleteOrgLogoFiles, mimeFromUpload } = require("../middleware/uploadOrgLogo");
+const {
+  findMembership,
+  verifyOrgMembershipPassword,
+  hashOrgPassword,
+  stripMemberPasswords,
+} = require("../utils/orgMembershipAuth");
 const OrganizationInvitation = require("../models/OrganizationInvitation");
 const User = require("../models/user");
 const {
@@ -21,6 +41,8 @@ const {
   resolveFrontendUrl,
 } = require("../utils/frontendUrl");
 const { validateInviteEmail } = require("../utils/emailValidation");
+const { normalizeHoursPerDay } = require("../utils/workHours");
+
 
 const slugify = (name) =>
   name
@@ -29,41 +51,80 @@ const slugify = (name) =>
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/(^-|-$)/g, "");
 
-const uniqueSlug = async (name) => {
+const uniqueSlug = async (name, excludeId) => {
   let slug = slugify(name);
   let suffix = 0;
-  while (await Organization.findOne({ slug: suffix ? `${slug}-${suffix}` : slug })) {
+  while (
+    await Organization.findOne({
+      slug: suffix ? `${slug}-${suffix}` : slug,
+      ...(excludeId ? { _id: { $ne: excludeId } } : {}),
+    })
+  ) {
     suffix += 1;
   }
   return suffix ? `${slug}-${suffix}` : slug;
 };
 
+function orgPublicFields(organization, userId) {
+  const obj = stripMemberPasswords(organization);
+  return {
+    ...obj,
+    myRole: organization.getMemberRole(userId),
+    hasLogo: Boolean(organization.logo?.filename),
+  };
+}
+
 // POST /api/organizations — personal workspace users only (no org membership yet)
 const createOrganization = async (req, res) => {
   try {
-    const { name, description } = req.body;
+    const { name, description, password } = req.body;
     if (!name) {
       return res.status(400).json({ message: "Organization name is required" });
     }
 
     const userId = req.user._id;
-
-    
     const slug = await uniqueSlug(name);
+
+    // Prefer an explicit org password; otherwise reuse the account password hash
+    // so existing owners keep working after org-wise auth.
+    let membershipPassword = null;
+    if (typeof password === "string" && password.trim().length >= 6) {
+      membershipPassword = await hashOrgPassword(password.trim());
+    } else if (req.user.password) {
+      membershipPassword = req.user.password;
+    }
 
     const organization = await Organization.create({
       name,
       slug,
       description: description || "",
       owner: userId,
-      members: [{ user: userId, role: "owner" }],
+      members: [
+        {
+          user: userId,
+          role: "owner",
+          password: membershipPassword,
+        },
+      ],
       roleDefinitions: getDefaultRoleDefinitions(),
     });
 
+    await ensureOrganizationHolidays(
+  organization._id
+);
+
     await User.findByIdAndUpdate(userId, { designation: "admin" });
 
+    try {
+      const { ensureOrgBuiltinWorkspaces, ensurePersonalWorkspace } = require("../utils/workspaces");
+      await ensurePersonalWorkspace(userId);
+      await ensureOrgBuiltinWorkspaces(organization._id, userId);
+    } catch (wsErr) {
+      console.error("Workspace bootstrap failed:", wsErr.message);
+    }
+
     res.status(201).json({
-      ...organization.toObject(),
+      ...stripMemberPasswords(organization),
       myRole: "owner",
     });
   } catch (error) {
@@ -76,14 +137,11 @@ const getMyOrganizations = async (req, res) => {
   try {
     const userId = req.user._id;
     const organizations = await Organization.find({
-      "members.user": userId,
+      $or: [{ owner: userId }, { "members.user": userId }],
       isDeleted: { $ne: true },
     }).populate("owner", "username email avatarColor");
 
-    const result = organizations.map((org) => ({
-      ...org.toObject(),
-      myRole: org.getMemberRole(userId),
-    }));
+    const result = organizations.map((org) => orgPublicFields(org, userId));
 
     res.json(result);
   } catch (error) {
@@ -111,10 +169,7 @@ const getOrganization = async (req, res) => {
       return res.status(403).json({ message: "You are not a member of this organization" });
     }
 
-    res.json({
-      ...organization.toObject(),
-      myRole: organization.getMemberRole(userId),
-    });
+    res.json(orgPublicFields(organization, userId));
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -139,7 +194,13 @@ const getOrganizationMembers = async (req, res) => {
     // A membership entry whose user was deleted elsewhere (without going
     // through the cleanup in deleteAccount) populates as null — drop it
     // rather than serving an unrenderable ghost member.
-    const members = organization.members.filter((member) => member.user);
+    const members = organization.members
+      .filter((member) => member.user)
+      .map((member) => {
+        const obj = typeof member.toObject === "function" ? member.toObject() : { ...member };
+        delete obj.password;
+        return obj;
+      });
 
     res.json(members);
   } catch (error) {
@@ -201,7 +262,7 @@ const inviteToOrganization = async (req, res) => {
       email: normalizedEmail,
       role,
       department,
-      token,
+      token: hashInviteToken(token),
       invitedBy: req.user._id,
       expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
     });
@@ -241,7 +302,7 @@ const inviteToOrganization = async (req, res) => {
     }
 
     res.status(201).json({
-      message: `Invitation sent to ${normalizedEmail}. They must register with this email to join.`,
+      message: `Invitation sent to ${normalizedEmail}. They'll set a password from the invite link to join.`,
       invitation: {
         _id: invitation._id,
         email: normalizedEmail,
@@ -360,13 +421,14 @@ const resendOrganizationInvitation = async (req, res) => {
     }
 
     // Refresh token + expiry so the new email link always works
-    invitation.token = crypto.randomBytes(32).toString("hex");
+    const freshToken = crypto.randomBytes(32).toString("hex");
+    invitation.token = hashInviteToken(freshToken);
     invitation.status = "pending";
     invitation.expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
     await invitation.save();
 
     const frontendUrl = resolveFrontendUrl(req);
-    const inviteUrl = `${frontendUrl}/invitations/accept?token=${invitation.token}`;
+    const inviteUrl = `${frontendUrl}/invitations/accept?token=${freshToken}`;
 
     queueOrgInviteEmail({
       to: invitation.email,
@@ -391,37 +453,105 @@ const resendOrganizationInvitation = async (req, res) => {
   }
 };
 
+// GET /api/organizations/invitations/token/:token — public, no auth.
+// Lets the frontend show who/what org is being joined and detect an
+// expired/revoked/already-used/invalid link before asking for a password.
+const previewInvitation = async (req, res) => {
+  try {
+    const token = req.params.token;
+    if (!token) {
+      return res.status(400).json({ valid: false, message: "Invitation token is required" });
+    }
+
+    const invitation = await OrganizationInvitation.findOne({
+      token: hashInviteToken(token),
+    }).populate("organization", "name slug");
+
+    if (!invitation) {
+      return res.status(404).json({ valid: false, message: "Invalid invitation link" });
+    }
+
+    if (invitation.status === "accepted") {
+      return res.status(409).json({ valid: false, message: "This invitation has already been used" });
+    }
+    if (invitation.status === "revoked") {
+      return res.status(410).json({ valid: false, message: "This invitation was revoked" });
+    }
+    if (invitation.status !== "pending" || invitation.expiresAt < new Date()) {
+      if (invitation.status === "pending") {
+        invitation.status = "expired";
+        await invitation.save();
+      }
+      return res.status(410).json({ valid: false, message: "This invitation has expired" });
+    }
+
+    const existingUser = await User.findOne({ email: invitation.email }).select("_id");
+
+    res.json({
+      valid: true,
+      email: invitation.email,
+      organizationName: invitation.organization?.name || "",
+      role: invitation.role,
+      department: invitation.department || "",
+      hasExistingAccount: Boolean(existingUser),
+    });
+  } catch (error) {
+    res.status(500).json({ valid: false, message: error.message });
+  }
+};
+
 // POST /api/organizations/invitations/accept
+//
+// Reachable both signed in (req.user set by optionalAuthMiddleware) and
+// signed out — a brand-new invitee has no account yet, so this can't sit
+// behind the organization router's blanket authMiddleware. See
+// routes/organizationRoutes.js for where this is mounted.
 const acceptInvitation = async (req, res) => {
   try {
-    const { token } = req.body;
+    const { token, password } = req.body;
     if (!token) {
       return res.status(400).json({ message: "Invitation token is required" });
     }
 
-    const invitation = await OrganizationInvitation.findOne({ token }).populate(
-      "organization",
-      "name slug members"
-    );
-
-    if (!invitation || invitation.status !== "pending") {
-      return res.status(404).json({ message: "Invalid or expired invitation" });
+    if (!password || String(password).trim().length < 6) {
+      return res.status(400).json({
+        message: "A password of at least 6 characters is required for this organization.",
+      });
     }
 
-    if (invitation.expiresAt < new Date()) {
-      invitation.status = "expired";
-      await invitation.save();
+    const invitation = await OrganizationInvitation.findOne({
+      token: hashInviteToken(token),
+    }).populate("organization", "name slug members");
+
+    if (!invitation) {
+      return res.status(404).json({ message: "Invalid or expired invitation" });
+    }
+    if (invitation.status === "accepted") {
+      return res.status(409).json({ message: "This invitation has already been used" });
+    }
+    if (invitation.status === "revoked") {
+      return res.status(410).json({ message: "This invitation was revoked" });
+    }
+    if (invitation.status !== "pending" || invitation.expiresAt < new Date()) {
+      if (invitation.status === "pending") {
+        invitation.status = "expired";
+        await invitation.save();
+      }
       return res.status(410).json({ message: "This invitation has expired" });
     }
 
-    const userEmail = normalizeEmail(req.user.email);
-    const invitedEmail = normalizeEmail(invitation.email);
-    if (userEmail !== invitedEmail) {
-      return res.status(403).json({
-        message: ` Sign in with the invited email, then open the link again.`,
-        invitedEmail,
-        signedInEmail: userEmail,
-      });
+    // Already signed in: must be signed in as the exact invited email —
+    // never let a different logged-in account claim someone else's invite.
+    if (req.user) {
+      const userEmail = normalizeEmail(req.user.email);
+      const invitedEmail = normalizeEmail(invitation.email);
+      if (userEmail !== invitedEmail) {
+        return res.status(403).json({
+          message: "Sign in with the invited email, then open the link again.",
+          invitedEmail,
+          signedInEmail: userEmail,
+        });
+      }
     }
 
     const organization = await Organization.findById(invitation.organization._id);
@@ -429,46 +559,139 @@ const acceptInvitation = async (req, res) => {
       return res.status(404).json({ message: "Organization not found" });
     }
 
-    if (organization.isMember(req.user._id)) {
-      invitation.status = "accepted";
-      await invitation.save();
+    // Resolve the account this invitation is for: the signed-in user, an
+    // existing account with the invited email, or (brand-new invitee) a
+    // freshly created one. Role/department always come from the validated
+    // invitation document below — never from the request body.
+    let user = req.user || (await User.findOne({ email: invitation.email }));
+
+    if (user && organization.isMember(user._id)) {
+      const claimed = await OrganizationInvitation.findOneAndUpdate(
+        { _id: invitation._id, status: "pending" },
+        { $set: { status: "accepted" } }
+      );
+      if (!claimed) {
+        return res.status(409).json({ message: "This invitation has already been used" });
+      }
       return res.json({
         message: "You are already a member",
-        organization: {
-          _id: organization._id,
-          name: organization.name,
-          slug: organization.slug,
-        },
+        organization: { _id: organization._id, name: organization.name, slug: organization.slug },
+        requiresLogin: !req.user,
+        email: invitation.email,
       });
     }
 
+    let createdNewUser = false;
+    if (!user) {
+      const localPart = invitation.email.split("@")[0].replace(/[^a-zA-Z0-9]/g, "") || "user";
+      user = await User.create({
+        username: localPart,
+        email: invitation.email,
+        verified: true,
+      });
+      createdNewUser = true;
+    }
+
+    // Single-use claim: only the first request to reach here for this
+    // invitation flips it to accepted, so a double-click or page refresh
+    // can't join the same invite twice.
+    const claimed = await OrganizationInvitation.findOneAndUpdate(
+      { _id: invitation._id, status: "pending" },
+      { $set: { status: "accepted" } }
+    );
+    if (!claimed) {
+      if (createdNewUser) {
+        await User.deleteOne({ _id: user._id });
+      }
+      return res.status(409).json({ message: "This invitation has already been used" });
+    }
+
+    const membershipPassword = await hashOrgPassword(String(password).trim());
     organization.members.push({
-      user: req.user._id,
+      user: user._id,
       role: invitation.role,
       department: invitation.department || "",
+      password: membershipPassword,
     });
     await organization.save();
 
     if (invitation.department) {
-      await User.findByIdAndUpdate(req.user._id, {
-        department: invitation.department,
-      });
+      await User.findByIdAndUpdate(user._id, { department: invitation.department });
     }
 
-    invitation.status = "accepted";
-    await invitation.save();
-
     res.json({
-      message: `You joined ${organization.name} as ${invitation.role}`,
+      message: `You joined ${organization.name} as ${invitation.role}. Log in with ${invitation.email} and the password you just created.`,
       organization: {
         _id: organization._id,
         name: organization.name,
         slug: organization.slug,
         myRole: invitation.role,
       },
+      requiresLogin: !req.user,
+      email: invitation.email,
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
+  }
+};
+
+// POST /api/organizations/:orgId/switch — password-gated org switch
+const switchOrganization = async (req, res) => {
+  try {
+    const organization = await Organization.findById(req.params.orgId);
+    if (!organization || organization.isDeleted) {
+      return res.status(404).json({ message: "Organization not found" });
+    }
+
+    if (!organization.isMember(req.user._id)) {
+      return res.status(403).json({
+        message: "You are not a member of this organization",
+      });
+    }
+
+    const { password } = req.body;
+    if (!password || !String(password).trim()) {
+      return res.status(400).json({ message: "Password is required" });
+    }
+
+    const valid = await verifyOrgMembershipPassword({
+      organization,
+      user: req.user,
+      password: String(password).trim(),
+      backfill: true,
+    });
+
+    if (!valid) {
+      return res.status(400).json({
+        message: `Invalid password for ${organization.name}`,
+      });
+    }
+
+    const jwt = require("jsonwebtoken");
+    const token = jwt.sign(
+      {
+        id: req.user._id,
+        organizationId: organization._id.toString(),
+      },
+      process.env.JWT_SECRET,
+      { expiresIn: "1d" }
+    );
+
+    const member = findMembership(organization, req.user._id);
+
+    return res.json({
+      message: "Organization switched",
+      token,
+      organizationId: organization._id.toString(),
+      organization: {
+        _id: organization._id,
+        name: organization.name,
+        slug: organization.slug,
+        myRole: member?.role || null,
+      },
+    });
+  } catch (error) {
+    return res.status(500).json({ message: error.message });
   }
 };
 
@@ -764,12 +987,128 @@ const deleteOrganizationRole = async (req, res) => {
   }
 };
 
+// PATCH /api/organizations/:orgId — name, description, optional logo
+const updateOrganization = async (req, res) => {
+  try {
+    const organization = req.organization;
+    const name =
+      typeof req.body.name === "string" ? req.body.name.trim() : undefined;
+    const description =
+      typeof req.body.description === "string" ? req.body.description : undefined;
+    const removeLogo =
+      req.body.removeLogo === "true" || req.body.removeLogo === true;
+
+    if (name !== undefined) {
+      if (!name) {
+        return res.status(400).json({ message: "Organization name is required" });
+      }
+      if (name !== organization.name) {
+        organization.name = name;
+        organization.slug = await uniqueSlug(name, organization._id);
+      }
+    }
+
+    if (description !== undefined) {
+      organization.description = description.trim();
+    }
+
+    if (req.file) {
+      const previous = organization.logo?.filename;
+      if (previous && previous !== req.file.filename) {
+        const previousPath = orgLogoPath(organization._id, previous);
+        if (fs.existsSync(previousPath)) fs.unlinkSync(previousPath);
+      }
+      organization.logo = {
+        filename: req.file.filename,
+        originalName: req.file.originalname,
+        mimeType: mimeFromUpload(req.file),
+        updatedAt: new Date(),
+      };
+      organization.markModified("logo");
+    } else if (removeLogo) {
+      deleteOrgLogoFiles(organization._id);
+      organization.logo = undefined;
+      organization.markModified("logo");
+    }
+
+    await organization.save();
+
+    res.json({
+      _id: organization._id,
+      name: organization.name,
+      slug: organization.slug,
+      description: organization.description || "",
+      hoursPerDay: normalizeHoursPerDay(organization.hoursPerDay),
+      hasLogo: Boolean(organization.logo?.filename),
+      logoUpdatedAt: organization.logo?.updatedAt || null,
+      myRole: organization.getMemberRole(req.user._id),
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// GET /api/organizations/:orgId/logo
+const getOrganizationLogo = async (req, res) => {
+  try {
+    const organization = req.organization;
+    const filename = organization.logo?.filename;
+    if (!filename) {
+      return res.status(404).json({ message: "No organization logo set" });
+    }
+
+    const filePath = orgLogoPath(organization._id, filename);
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ message: "Logo file not found" });
+    }
+
+    const ext = require("path").extname(filename).toLowerCase();
+    const mimeByExt = {
+      ".png": "image/png",
+      ".jpg": "image/jpeg",
+      ".jpeg": "image/jpeg",
+      ".svg": "image/svg+xml",
+      ".webp": "image/webp",
+      ".gif": "image/gif",
+    };
+    res.setHeader(
+      "Content-Type",
+      organization.logo.mimeType || mimeByExt[ext] || "image/png"
+    );
+    res.setHeader("Cache-Control", "no-store");
+    fs.createReadStream(filePath).pipe(res);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+const updateOrganizationWorkHours = async (req, res) => {
+  try {
+    const organization = req.organization;
+    const raw = Number(req.body.hoursPerDay);
+    if (!Number.isFinite(raw) || raw < 1 || raw > 24) {
+      return res.status(400).json({
+        message: "Daily hours must be a number between 1 and 24",
+      });
+    }
+
+    organization.hoursPerDay = normalizeHoursPerDay(raw);
+    await organization.save();
+
+    res.json({
+      hoursPerDay: organization.hoursPerDay,
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
 // GET /api/organizations/me/access — current user's org access summary for frontend
 const getMyAccess = async (req, res) => {
   try {
     const userId = req.user._id;
     const organizations = await Organization.find({
-      "members.user": userId,
+      $or: [{ owner: userId }, { "members.user": userId }],
       isDeleted: { $ne: true },
     });
 
@@ -779,9 +1118,13 @@ const getMyAccess = async (req, res) => {
         organizationId: org._id,
         name: org.name,
         slug: org.slug,
+        description: org.description || "",
         role: org.getMemberRole(userId),
+        hasLogo: Boolean(org.logo?.filename),
+        logoUpdatedAt: org.logo?.updatedAt || null,
         orgPermissions: resolveMemberOrgPermissions(org, userId),
         projectPermissions: resolveMemberProjectPermissions(org, userId),
+        hoursPerDay: normalizeHoursPerDay(org.hoursPerDay),
       };
     });
 
@@ -797,8 +1140,15 @@ const getMyAccess = async (req, res) => {
       hasOrgMembership: orgMemberships.length > 0,
       organizations: orgMemberships,
       pendingInvitations,
-      // Users with no org memberships keep full personal workspace permissions
-      personalWorkspace: orgMemberships.length === 0,
+      // Personal Workspace is always available alongside any org memberships.
+      personalWorkspace: true,
+      workspaceType:
+        req.activeOrganizationId &&
+        orgMemberships.some(
+          (o) => String(o.organizationId) === String(req.activeOrganizationId)
+        )
+          ? "organization"
+          : "personal",
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -852,6 +1202,16 @@ const moveOrganizationToTrash = async (req, res) => {
       }
     );
 
+    try {
+      const Workspace = require("../models/Workspace");
+      await Workspace.updateMany(
+        { organization: organization._id, isDeleted: { $ne: true } },
+        { isDeleted: true }
+      );
+    } catch (wsErr) {
+      console.error("Workspace trash cascade failed:", wsErr.message);
+    }
+
     // Move all tasks to trash + inactive
     await Task.updateMany(
       {
@@ -898,6 +1258,7 @@ const moveOrganizationToTrash = async (req, res) => {
   inviteToOrganization,
   getOrganizationInvitations,
   resendOrganizationInvitation,
+  previewInvitation,
   acceptInvitation,
   getMyPendingInvitations,
   removeOrganizationMember,
@@ -908,5 +1269,9 @@ const moveOrganizationToTrash = async (req, res) => {
   createOrganizationRole,
   deleteOrganizationRole,
   getMyAccess,
+  updateOrganization,
+  updateOrganizationWorkHours,
+  getOrganizationLogo,
+  switchOrganization,
   moveOrganizationToTrash,
 };

@@ -4,6 +4,7 @@ export type StoredUser = {
   email?: string;
   avatarColor?: string;
   systemRole?: string;
+  colorTheme?: string | null;
 };
 
 export function getStoredUser(): StoredUser | null {

@@ -4,6 +4,7 @@ const Task = require("../models/Task");
 const LeaveRequest = require("../models/LeaveRequest");
 const User = require("../models/user");
 const Notification = require("../models/Notification");
+const Holiday = require("../models/Holiday");
 const { buildProjectListFilter } = require("../utils/projectAccess");
 const {
   startOfToday,
@@ -12,8 +13,27 @@ const {
   ACTIVE_TASK_FILTER,
   buildAssignedActiveTaskFilter,
   COMPLETED_STATUS,
+  getTaskProgressWeight,
+  getTaskProjectId,
 } = require("../utils/taskQueries");
 const mongoose = require("mongoose");
+const {
+  DEFAULT_HOURS_PER_DAY,
+  normalizeHoursPerDay,
+} = require("../utils/workHours");
+const {
+  collectAssigneeIds,
+  calculateResourceWorkload,
+} = require("../services/resourcePlanningService");
+
+function scopeFromQuery(query = {}) {
+  return {
+    organizationId: query.organizationId,
+    personal: query.personal,
+    allOrgProjects: query.allOrgProjects,
+    workspaceId: query.workspaceId,
+  };
+}
 
 function getPeriodStart(period) {
   const days = period === "7d" ? 7 : period === "90d" ? 90 : 30;
@@ -50,30 +70,66 @@ function normalizeDate(date) {
   return d;
 }
 
-function getWorkingDays(start, end) {
-  const days = [];
+function isOnApprovedLeave(leaves, date) {
+  const day = normalizeDate(date).getTime();
+  return leaves.some((leave) => {
+    const start = normalizeDate(leave.startDate).getTime();
+    const end = normalizeDate(leave.endDate).getTime();
+    return day >= start && day <= end;
+  });
+}
 
-  let current = normalizeDate(start);
-  const last = normalizeDate(end);
+function normalizeWorkingDays(days) {
+  const DEFAULT = [1, 2, 3, 4, 5];
+  if (!Array.isArray(days) || days.length === 0) return [...DEFAULT];
+  const cleaned = [
+    ...new Set(
+      days
+        .map(Number)
+        .filter((d) => Number.isInteger(d) && d >= 0 && d <= 6)
+    ),
+  ].sort((a, b) => a - b);
+  return cleaned.length > 0 ? cleaned : [...DEFAULT];
+}
 
+function isConfiguredWorkingDay(date, workingDays) {
+  return workingDays.includes(date.getDay());
+}
+
+/** Inclusive working-day count for a task's own start→due range. */
+function countTaskWorkingDays(task) {
+  if (!task?.startDate || !task?.dueDate) return 0;
+  const workingDays = normalizeWorkingDays(task.workingDays);
+  const current = normalizeDate(task.startDate);
+  const last = normalizeDate(task.dueDate);
+  if (last < current) return 0;
+  let count = 0;
   while (current <= last) {
-    if (!isWeekend(current)) {
-      days.push(new Date(current));
-    }
-
+    if (isConfiguredWorkingDay(current, workingDays)) count += 1;
     current.setDate(current.getDate() + 1);
   }
+  return count;
+}
 
-  return days;
+function findOrgMemberRecord(organization, userId) {
+  if (!organization?.members) return { user: userId };
+  const id = String(userId);
+  return (
+    organization.members.find((member) => {
+      const memberId = member.user?._id || member.user;
+      return String(memberId) === id;
+    }) || { user: userId }
+  );
 }
 
 async function getDashboardStatsData(userId, query) {
-    const { organizationId, personal, allOrgProjects } = query;
+    const { organizationId, personal, allOrgProjects, workspaceId } = query;
 
     const result = await buildProjectListFilter(userId, {
       organizationId,
       personal,
       allOrgProjects,
+      workspaceId,
     });
 
     if (result.error) {
@@ -164,21 +220,15 @@ const getDashboardStats = async (req, res) => {
 };
 const getTaskOverview = async (req, res) => {
   try {
-    const { organizationId, personal } = req.query;
-
-    const projectFilter = {
-      "members.user": new mongoose.Types.ObjectId(req.user._id),
-      isDeleted: { $ne: true },
-    };
-
-    if (organizationId) {
-      projectFilter.organization = new mongoose.Types.ObjectId(organizationId);
-    } else if (personal === "true") {
-      projectFilter.organization = null;
+    const scope = scopeFromQuery(req.query);
+    const filterResult = await buildProjectListFilter(req.user._id, scope);
+    if (filterResult.error) {
+      return res
+        .status(filterResult.error.status)
+        .json({ message: filterResult.error.message });
     }
 
-    // Projects + one $group by status (was 1 + 4 + N countDocuments)
-    const projects = await Project.find(projectFilter, "_id customStatuses").lean();
+    const projects = await Project.find(filterResult.filter, "_id customStatuses").lean();
     const projectIds = projects.map((p) => p._id);
 
     const customStatusMap = {};
@@ -254,101 +304,58 @@ const getTaskOverview = async (req, res) => {
 
 const getProjectProgress = async (req, res) => {
   try {
-    const { organizationId, personal } = req.query;
-
-    const projectFilter = {
-      "members.user": new mongoose.Types.ObjectId(req.user._id),
-      isDeleted: { $ne: true },
-    };
-
-    if (organizationId) {
-      projectFilter.organization = new mongoose.Types.ObjectId(organizationId);
-    } else if (personal === "true") {
-      projectFilter.organization = null;
+    const scope = scopeFromQuery(req.query);
+    const filterResult = await buildProjectListFilter(req.user._id, scope);
+    if (filterResult.error) {
+      return res
+        .status(filterResult.error.status)
+        .json({ message: filterResult.error.message });
     }
 
-    // One aggregation: projects → task progress (was N+1 queries)
-    const progressData = await Project.aggregate([
-      { $match: projectFilter },
-      {
-        $lookup: {
-          from: "tasks",
-          let: { pid: "$_id" },
-          pipeline: [
-            {
-              $match: {
-                $expr: { $eq: ["$project", "$$pid"] },
-                ...ACTIVE_TASK_FILTER,
-              },
-            },
-            {
-              $project: {
-                weight: {
-                  $switch: {
-                    branches: [
-                      {
-                        case: {
-                          $in: [
-                            { $toLower: { $ifNull: ["$status", ""] } },
-                            ["completed", "done"],
-                          ],
-                        },
-                        then: 100,
-                      },
-                      {
-                        case: {
-                          $eq: [
-                            { $toLower: { $ifNull: ["$status", ""] } },
-                            "review",
-                          ],
-                        },
-                        then: 80,
-                      },
-                      {
-                        case: {
-                          $eq: [
-                            { $toLower: { $ifNull: ["$status", ""] } },
-                            "in-progress",
-                          ],
-                        },
-                        then: 50,
-                      },
-                    ],
-                    default: 0,
-                  },
-                },
-              },
-            },
-            {
-              $group: {
-                _id: null,
-                total: { $sum: 1 },
-                sum: { $sum: "$weight" },
-              },
-            },
-          ],
-          as: "stats",
-        },
-      },
-      {
-        $addFields: {
-          total: { $ifNull: [{ $arrayElemAt: ["$stats.total", 0] }, 0] },
-          sum: { $ifNull: [{ $arrayElemAt: ["$stats.sum", 0] }, 0] },
-        },
-      },
-      { $match: { total: { $gt: 0 } } },
-      {
-        $project: {
-          _id: 0,
-          projectId: { $toString: "$_id" },
-          projectName: "$title",
-          progress: {
-            $round: [{ $divide: ["$sum", "$total"] }, 0],
-          },
-        },
-      },
-    ]);
+    const projects = await Project.find(filterResult.filter)
+      .select("_id title customStatuses")
+      .lean();
 
+    if (!projects.length) {
+      return res.json([]);
+    }
+
+    const projectIds = projects.map((project) => project._id);
+    const tasks = await Task.find({
+      project: { $in: projectIds },
+      ...ACTIVE_TASK_FILTER,
+    })
+      .select("project status completed")
+      .lean();
+
+    const tasksByProjectId = new Map();
+    for (const task of tasks) {
+      const projectId = getTaskProjectId(task);
+      if (!projectId) continue;
+      if (!tasksByProjectId.has(projectId)) {
+        tasksByProjectId.set(projectId, []);
+      }
+      tasksByProjectId.get(projectId).push(task);
+    }
+
+    const progressData = projects.map((project) => {
+      const projectId = project._id.toString();
+      const projectTasks = tasksByProjectId.get(projectId) || [];
+      const total = projectTasks.length;
+      const sum = projectTasks.reduce(
+        (acc, task) => acc + getTaskProgressWeight(task, project),
+        0
+      );
+      const progress = total > 0 ? Math.round(sum / total) : 0;
+
+      return {
+        projectId,
+        projectName: project.title,
+        progress,
+      };
+    });
+
+    progressData.sort((a, b) => b.progress - a.progress);
     res.json(progressData);
   } catch (error) {
     res.status(500).json({
@@ -357,8 +364,18 @@ const getProjectProgress = async (req, res) => {
   }
 };
 
-async function getTeamWorkloadData(query) {
+async function getTeamWorkloadData(userId, query) {
   const { projectId, organizationId, role, status } = query;
+  let workspaceProjectIds = null;
+  if (query.workspaceId && !projectId) {
+    const projectResult = await getAccessibleProjectIds(userId, scopeFromQuery(query));
+    if (projectResult.error) {
+      throw Object.assign(new Error(projectResult.error.message), {
+        status: projectResult.error.status,
+      });
+    }
+    workspaceProjectIds = projectResult.ids;
+  }
 
   const rangeStart = query.startDate
     ? new Date(query.startDate)
@@ -382,6 +399,8 @@ async function getTeamWorkloadData(query) {
   let effectiveOrganizationId = null;
   let project = null;
   let useProjectScope = false;
+  let orgHoursPerDay = DEFAULT_HOURS_PER_DAY;
+  let organizationDoc = null;
 
   if (projectId) {
     project = await Project.findById(projectId).populate(
@@ -407,26 +426,65 @@ async function getTeamWorkloadData(query) {
   }
 
   if (!useProjectScope && organizationId) {
-    const organization = await Organization.findById(organizationId).populate(
+    organizationDoc = await Organization.findById(organizationId).populate(
       "members.user",
       "username email designation role avatarColor"
     );
 
-    if (!organization) {
+    if (!organizationDoc) {
       throw Object.assign(new Error("Organization not found"), { status: 404 });
     }
 
-    users = organization.members
+    users = organizationDoc.members
       .filter((m) => m.user)
       .map((m) => ({
         ...m.user.toObject(),
         organizationRole: m.role,
       }));
-    effectiveOrganizationId = organization._id;
+
+    // Always include the org owner even if missing from members[].
+    if (organizationDoc.owner) {
+      const ownerId = String(
+        organizationDoc.owner._id || organizationDoc.owner
+      );
+      if (!users.some((u) => String(u._id) === ownerId)) {
+        let ownerUser =
+          typeof organizationDoc.owner === "object" && organizationDoc.owner._id
+            ? organizationDoc.owner
+            : await User.findById(organizationDoc.owner).select(
+                "username email designation role avatarColor"
+              );
+        if (ownerUser) {
+          const plain =
+            typeof ownerUser.toObject === "function"
+              ? ownerUser.toObject()
+              : ownerUser;
+          users.unshift({ ...plain, organizationRole: "owner" });
+        }
+      }
+    }
+
+    effectiveOrganizationId = organizationDoc._id;
+    orgHoursPerDay = normalizeHoursPerDay(organizationDoc.hoursPerDay);
   } else if (!useProjectScope) {
     throw Object.assign(new Error("projectId or organizationId is required"), {
       status: 400,
     });
+  }
+
+  if (effectiveOrganizationId) {
+    if (
+      !organizationDoc ||
+      String(organizationDoc._id) !== String(effectiveOrganizationId)
+    ) {
+      organizationDoc = await Organization.findById(effectiveOrganizationId).populate(
+        "members.user",
+        "username email designation role avatarColor"
+      );
+    }
+    if (organizationDoc) {
+      orgHoursPerDay = normalizeHoursPerDay(organizationDoc.hoursPerDay);
+    }
   }
 
   const availableRoles = [
@@ -448,218 +506,251 @@ async function getTeamWorkloadData(query) {
       overCapacity: 0,
       underCapacity: 0,
       availableRoles,
+      hoursPerDay: orgHoursPerDay,
     };
   }
 
-  const workload = await Promise.all(
-    users.map(async (user) => {
-      const taskFilter = {
-        organization: effectiveOrganizationId,
-        isDeleted: { $ne: true },
-        $or: [{ assignee: user._id }, { assignees: user._id }],
-      };
+  const userIds = users.map((user) => user._id);
+  const totalDays =
+    Math.floor((rangeEnd - rangeStart) / (1000 * 60 * 60 * 24)) + 1;
+  const dayCount = Math.max(totalDays, 0);
 
-      if (project?._id) {
-        taskFilter.project = project._id;
-      }
+  const [
+  orgTasks,
+  orgLeaves,
+  organizationHolidays,
+] = await Promise.all([
+  Task.find({
+    organization: effectiveOrganizationId,
+    isDeleted: { $ne: true },
+    $or: [
+      { assignee: { $in: userIds } },
+      { assignees: { $in: userIds } },
+    ],
+  }).select(
+    "title status priority effortHours startDate dueDate project assignees assignee workingDays durationHours"
+  ),
 
-      if (status && status !== "All") {
-        taskFilter.status = status;
-      }
+  LeaveRequest.find({
+    employee: { $in: userIds },
+    organization: effectiveOrganizationId,
+    status: "approved",
+  }).select(
+    "employee startDate endDate leaveType reason status"
+  ),
 
-      const tasks = await Task.find(taskFilter)
-        .select(
-          "title status priority effortHours startDate dueDate project assignees assignee"
-        )
-        .lean();
+  Holiday.find({
+    organizationId: effectiveOrganizationId,
+    isEnabled: true,
+  }).select(
+    "name date dateKey year description state country isEnabled source"
+  ).lean(),
+]);
 
-      const leaves = await LeaveRequest.find({
-        employee: user._id,
-        organization: effectiveOrganizationId,
-        status: "approved",
-        startDate: { $lte: rangeEnd },
-        endDate: { $gte: rangeStart },
-      })
-        .select("startDate endDate leaveType reason status")
-        .lean();
+  const workspaceIdSet = workspaceProjectIds
+    ? new Set(workspaceProjectIds.map((id) => String(id)))
+    : null;
 
-      const assignedTasks = tasks.length;
+  const taskInChartScope = (task) => {
+    if (project?._id && String(task.project) !== String(project._id)) {
+      return false;
+    }
+    if (!project?._id && workspaceIdSet && !workspaceIdSet.has(String(task.project))) {
+      return false;
+    }
+    if (status && status !== "All" && task.status !== status) {
+      return false;
+    }
+    return true;
+  };
 
-      const completedTasks = tasks.filter(
-        (task) => task.status === "completed" || task.status === "done"
-      ).length;
+  const workload = users.map((user) => {
+    const memberUserId = String(user._id);
+    const leaves = orgLeaves.filter(
+      (leave) => String(leave.employee) === memberUserId
+    );
+    const userTasks = orgTasks.filter((task) =>
+      collectAssigneeIds(task).includes(memberUserId)
+    );
+    const scopedTasks = userTasks.filter(taskInChartScope);
+    const memberRecord = findOrgMemberRecord(organizationDoc, user._id);
 
-      const totalHours = tasks.reduce((sum, task) => {
-        const effort = task.effortHours != null ? Number(task.effortHours) : 0;
-        return sum + effort;
-      }, 0);
+    const assignedTasks = scopedTasks.length;
+    const completedTasks = scopedTasks.filter(
+      (task) => task.status === "completed" || task.status === "done"
+    ).length;
 
-      const totalDays =
-        Math.floor((rangeEnd - rangeStart) / (1000 * 60 * 60 * 24)) + 1;
-      const dailyWorkload = new Array(Math.max(totalDays, 0)).fill(0);
-      const taskTimeline = [];
+    const orgForCalc = organizationDoc
+  ? {
+      ...(typeof organizationDoc.toObject === "function"
+        ? organizationDoc.toObject()
+        : organizationDoc),
+      holidays: organizationHolidays,
+    }
+  : {
+      hoursPerDay: orgHoursPerDay,
+      holidays: organizationHolidays,
+    };
+    const scopedWorkload = calculateResourceWorkload({
+      member: memberRecord,
+      organization: orgForCalc,
+      tasks: scopedTasks,
+      leaves,
+      rangeStart,
+      rangeEnd,
+    });
+    const allWorkload = calculateResourceWorkload({
+      member: memberRecord,
+      organization: orgForCalc,
+      tasks: userTasks,
+      leaves,
+      rangeStart,
+      rangeEnd,
+    });
 
-      tasks.sort((a, b) => {
-        const aStart = a.startDate
-          ? new Date(a.startDate).getTime()
-          : Number.MAX_SAFE_INTEGER;
-        const bStart = b.startDate
-          ? new Date(b.startDate).getTime()
-          : Number.MAX_SAFE_INTEGER;
-        return aStart - bStart;
-      });
+    const dailyWorkload = scopedWorkload.dailyAllocated;
+    const dailyOutside = allWorkload.dailyAllocated.map((allHours, index) =>
+      Math.max(allHours - dailyWorkload[index], 0)
+    );
 
-      tasks.forEach((task) => {
-        if (!task.startDate || !task.dueDate) return;
+    const allocationByTaskId = new Map(
+      scopedWorkload.allocations.map((row) => [String(row.task._id), row])
+    );
 
-        const start = new Date(task.startDate);
-        const end = new Date(task.dueDate);
-        start.setHours(0, 0, 0, 0);
-        end.setHours(0, 0, 0, 0);
+    const sortedScoped = [...scopedTasks].sort((a, b) => {
+      const aStart = a.startDate
+        ? new Date(a.startDate).getTime()
+        : Number.MAX_SAFE_INTEGER;
+      const bStart = b.startDate
+        ? new Date(b.startDate).getTime()
+        : Number.MAX_SAFE_INTEGER;
+      return aStart - bStart;
+    });
 
-        const effort = Number(task.effortHours || 0);
-        const workingDays = getWorkingDays(start, end);
-        const hoursPerDay =
-          workingDays.length > 0 ? effort / workingDays.length : 0;
+    let scheduledWorkingDays = 0;
+    const taskTimeline = sortedScoped.map((task) => {
+      const allocation = allocationByTaskId.get(String(task._id));
+      const share = allocation?.share || 0;
+      const hoursPerDay = allocation?.hoursPerDay || 0;
+      const workingDayCount = countTaskWorkingDays(task);
+      scheduledWorkingDays += workingDayCount || 0;
 
-        const startIndex = Math.max(
-          0,
-          Math.floor(
-            (start.getTime() - rangeStart.getTime()) / (1000 * 60 * 60 * 24)
-          )
-        );
-
-        const endIndex = Math.min(
-          totalDays - 1,
-          Math.floor(
-            (end.getTime() - rangeStart.getTime()) / (1000 * 60 * 60 * 24)
-          )
-        );
-
-        taskTimeline.push({
+      if (!task.startDate || !task.dueDate) {
+        return {
           _id: task._id,
           project: task.project,
           title: task.title,
-          startDate: task.startDate,
-          dueDate: task.dueDate,
-          startIndex,
-          endIndex,
-          effortHours: effort,
-          hoursPerDay: Number(hoursPerDay.toFixed(1)),
+          startDate: task.startDate || null,
+          dueDate: task.dueDate || null,
+          startIndex: -1,
+          endIndex: -1,
+          effortHours: Number(share.toFixed(1)),
+          hoursPerDay: 0,
+          workingDayCount: 0,
           priority: task.priority,
           status: task.status,
-        });
+          unscheduled: true,
+        };
+      }
 
-        for (
-          let currentDay = new Date(start);
-          currentDay <= end;
-          currentDay.setDate(currentDay.getDate() + 1)
-        ) {
-          const index = Math.floor(
-            (currentDay.getTime() - rangeStart.getTime()) /
-              (1000 * 60 * 60 * 24)
-          );
-          if (currentDay.getDay() === 0 || currentDay.getDay() === 6) continue;
-          if (index < 0 || index >= dailyWorkload.length) continue;
-
-          const normalizedCurrentDay = normalizeDate(currentDay);
-          const isOnLeave = leaves.some((leave) => {
-            const leaveStart = normalizeDate(leave.startDate);
-            const leaveEnd = normalizeDate(leave.endDate);
-            return (
-              normalizedCurrentDay >= leaveStart &&
-              normalizedCurrentDay <= leaveEnd
-            );
-          });
-
-          if (isOnLeave) continue;
-          dailyWorkload[index] += hoursPerDay;
-        }
-      });
-
-      const completion =
-        assignedTasks === 0
-          ? 0
-          : Math.round((completedTasks / assignedTasks) * 100);
-
-      const workingDays = getWorkingDays(rangeStart, rangeEnd);
-
-      let leaveDays = 0;
-      workingDays.forEach((day) => {
-        const onLeave = leaves.some((leave) => {
-          const start = normalizeDate(leave.startDate);
-          const end = normalizeDate(leave.endDate);
-          return day >= start && day <= end;
-        });
-        if (onLeave) leaveDays++;
-      });
-
-      const availableHours = (workingDays.length - leaveDays) * 8;
-      const availableWorkingDays = workingDays.length - leaveDays;
-      const allocatedHours = dailyWorkload.reduce((sum, h) => sum + h, 0);
-
-      const utilization =
-        availableHours === 0
-          ? 0
-          : Math.round((allocatedHours / availableHours) * 100);
-
-      const remainingCapacity = availableHours - allocatedHours;
-
-      let workloadStatus = "Available";
-      if (utilization > 150) workloadStatus = "Overloaded";
-      else if (utilization > 100) workloadStatus = "High Load";
-      else if (utilization >= 70) workloadStatus = "Healthy";
-
-      const capacityPercentage =
-        availableHours === 0
-          ? 0
-          : Math.min(Math.round((totalHours / availableHours) * 100), 999);
+      const start = normalizeDate(task.startDate);
+      const end = normalizeDate(task.dueDate);
+      const startIndex = Math.max(
+        0,
+        Math.floor((start.getTime() - rangeStart.getTime()) / (1000 * 60 * 60 * 24))
+      );
+      const endIndex = Math.min(
+        dayCount - 1,
+        Math.floor((end.getTime() - rangeStart.getTime()) / (1000 * 60 * 60 * 24))
+      );
 
       return {
-        _id: user._id,
-        username: user.username,
-        email: user.email,
-        avatarColor: user.avatarColor || null,
-        role: user.organizationRole || "developer",
-        assignedTasks,
-        completedTasks,
-        totalHours,
-        allocatedHours,
-        availableHours,
-        availableWorkingDays,
-        utilization,
-        remainingCapacity,
-        workloadStatus,
-        capacityPercentage,
-        completion,
-        workload: dailyWorkload.map((h) => Math.round(h)),
-        tasks: taskTimeline,
-        leaves,
+        _id: task._id,
+        project: task.project,
+        title: task.title,
+        startDate: task.startDate,
+        dueDate: task.dueDate,
+        startIndex,
+        endIndex,
+        effortHours: Number(share.toFixed(1)),
+        hoursPerDay: Number(hoursPerDay.toFixed(1)),
+        workingDayCount: workingDayCount || 0,
+        priority: task.priority,
+        status: task.status,
       };
-    })
-  );
+    });
+
+    const completion =
+      assignedTasks === 0
+        ? 0
+        : Math.round((completedTasks / assignedTasks) * 100);
+
+    const memberHoursPerDay = scopedWorkload.settings.hoursPerDay || orgHoursPerDay;
+    const allocatedHours = scopedWorkload.allocatedEffortHours;
+    const availableHours = scopedWorkload.capacityHours;
+    const utilization = scopedWorkload.utilization;
+    const remainingCapacity = scopedWorkload.availableHours;
+
+    return {
+      _id: user._id,
+      username: user.username,
+      email: user.email,
+      avatarColor: user.avatarColor || null,
+      role: user.organizationRole || "developer",
+      assignedTasks,
+      completedTasks,
+      totalHours: Math.round(allocatedHours),
+      allocatedHours: Math.round(allocatedHours),
+      availableHours,
+      availableWorkingDays: scopedWorkload.dailyCapacity.filter((hours) => hours > 0)
+        .length,
+      scheduledWorkingDays,
+      hoursPerDay: memberHoursPerDay,
+      utilization,
+      remainingCapacity: Math.round(remainingCapacity),
+      workloadStatus: scopedWorkload.workloadStatus,
+      resourceStatus: scopedWorkload.resourceStatus,
+      utilizationTarget: scopedWorkload.utilizationTarget,
+      aboveTarget: scopedWorkload.aboveTarget,
+      overallocated: scopedWorkload.overallocation.overallocated,
+      overBy: scopedWorkload.overallocation.overBy,
+      capacityPercentage: utilization,
+      completion,
+      workload: dailyWorkload.map((hours) => Math.round(hours)),
+      workloadOutside: dailyOutside.map((hours) => Math.round(hours)),
+      dailyCapacity: scopedWorkload.dailyCapacity,
+      dailyRows: scopedWorkload.dailyRows,
+      tasks: taskTimeline,
+      leaves,
+    };
+  });
 
   const totalMembers = workload.length;
 
-  const memberCapacities = workload.map((member) => {
-    const maxDailyHours = Math.max(...member.workload, 0);
-    return Math.min(Math.round((maxDailyHours / 8) * 100), 100);
-  });
+  const memberUtilizations = workload.map((member) => member.utilization);
 
   const averageCapacity =
     totalMembers === 0
       ? 0
       : Math.round(
-          memberCapacities.reduce((a, b) => a + b, 0) / totalMembers
+          memberUtilizations.reduce((a, b) => a + b, 0) / totalMembers
         );
 
   const overCapacity = workload.filter((member) =>
-    member.workload.some((h) => h > 8)
+    member.workload.some((hours, index) => {
+      const totalDay =
+        hours + (member.workloadOutside?.[index] || 0);
+      const cap = member.dailyCapacity?.[index] ?? orgHoursPerDay;
+      return cap > 0 && totalDay > cap;
+    })
   ).length;
 
   const underCapacity = workload.filter((member) => {
-    const maxDailyHours = Math.max(...member.workload, 0);
-    return maxDailyHours < 8;
+    const peak = member.workload.reduce((max, hours, index) => {
+      const totalDay = hours + (member.workloadOutside?.[index] || 0);
+      return Math.max(max, totalDay);
+    }, 0);
+    return peak < orgHoursPerDay;
   }).length;
 
   return {
@@ -669,13 +760,14 @@ async function getTeamWorkloadData(query) {
     averageCapacity,
     overCapacity,
     underCapacity,
+    hoursPerDay: orgHoursPerDay,
   };
 }
 
 
 const getTeamWorkload = async (req, res) => {
   try {
-    res.json(await getTeamWorkloadData(req.query));
+    res.json(await getTeamWorkloadData(req.user._id, req.query));
   } catch (error) {
     console.error(error);
     res.status(error.status || 500).json({
@@ -688,12 +780,14 @@ async function fetchDeadlineTasks({
   userId,
   organizationId,
   personal,
+  workspaceId,
   dueDateFilter,
   limit,
 }) {
   const projectResult = await getAccessibleProjectIds(userId, {
     organizationId,
     personal,
+    workspaceId,
   });
 
   if (projectResult.error) {
@@ -736,13 +830,12 @@ async function fetchDeadlineTasks({
 
 const getUpcomingDeadlines = async (req, res) => {
   try {
-    const { organizationId, personal } = req.query;
+    const scope = scopeFromQuery(req.query);
     const today = startOfToday();
 
     const result = await fetchDeadlineTasks({
       userId: req.user._id,
-      organizationId,
-      personal,
+      ...scope,
       dueDateFilter: { $ne: null, $gte: today },
       limit: 5,
     });
@@ -763,13 +856,12 @@ const getUpcomingDeadlines = async (req, res) => {
 
 const getMissedDeadlines = async (req, res) => {
   try {
-    const { organizationId, personal } = req.query;
+    const scope = scopeFromQuery(req.query);
     const today = startOfToday();
 
     const result = await fetchDeadlineTasks({
       userId: req.user._id,
-      organizationId,
-      personal,
+      ...scope,
       dueDateFilter: { $ne: null, $lt: today },
       limit: 10,
     });
@@ -791,18 +883,12 @@ const getMissedDeadlines = async (req, res) => {
 const getProjectBreakdown = async (req, res) => {
   try {
     const {
-      organizationId,
-      personal,
       period = "30d",
       projectId,
-      allOrgProjects,
     } = req.query;
+    const scope = scopeFromQuery(req.query);
 
-    const result = await buildProjectListFilter(req.user._id, {
-      organizationId,
-      personal,
-      allOrgProjects,
-    });
+    const result = await buildProjectListFilter(req.user._id, scope);
 
     if (result.error) {
       return res
@@ -862,18 +948,12 @@ const getProjectBreakdown = async (req, res) => {
 const getTeamPerformance = async (req, res) => {
   try {
     const {
-      organizationId,
-      personal,
       period = "30d",
       projectId,
-      allOrgProjects,
     } = req.query;
+    const scope = scopeFromQuery(req.query);
 
-    const projectResult = await getAccessibleProjectIds(req.user._id, {
-      organizationId,
-      personal,
-      allOrgProjects,
-    });
+    const projectResult = await getAccessibleProjectIds(req.user._id, scope);
 
     if (projectResult.error) {
       return res
@@ -993,19 +1073,10 @@ const getTeamPerformance = async (req, res) => {
 
 const getWeeklyTaskActivity = async (req, res) => {
   try {
-    const {
-      organizationId,
-      personal,
-      period = "7d",
-      projectId,
-      allOrgProjects,
-    } = req.query;
+    const { period = "7d", projectId } = req.query;
+    const scope = scopeFromQuery(req.query);
 
-    const projectResult = await getAccessibleProjectIds(req.user._id, {
-      organizationId,
-      personal,
-      allOrgProjects,
-    });
+    const projectResult = await getAccessibleProjectIds(req.user._id, scope);
 
     if (projectResult.error) {
       return res
@@ -1109,6 +1180,8 @@ async function buildAssignedUserReport({
   period = "30d",
   projectId = null,
   organizationId = null,
+  personal = false,
+  workspaceId = null,
   recentTasksLimit = 12,
   includeTaskDistribution = false,
   projectAccessDeniedMessage = "You do not have access to this project",
@@ -1118,6 +1191,8 @@ async function buildAssignedUserReport({
 
   const projectResult = await getAccessibleProjectIds(subjectUserId, {
     ...(organizationId ? { organizationId } : {}),
+    ...(personal ? { personal: "true" } : {}),
+    workspaceId: workspaceId || undefined,
   });
   if (projectResult.error) {
     throw Object.assign(new Error(projectResult.error.message), {
@@ -1340,10 +1415,14 @@ async function buildAssignedUserReport({
 const getPersonalReport = async (req, res) => {
   try {
     const { period = "30d", projectId } = req.query;
+    const scope = scopeFromQuery(req.query);
     const report = await buildAssignedUserReport({
       subjectUserId: req.user._id,
       period,
       projectId: projectId || null,
+      organizationId: scope.organizationId || null,
+      personal: req.query.personal === "true",
+      workspaceId: scope.workspaceId || null,
       recentTasksLimit: 12,
       includeTaskDistribution: false,
       projectAccessDeniedMessage: "You do not have access to this project",
@@ -1408,11 +1487,13 @@ const getMemberReport = async (req, res) => {
           : organization.getMemberRole(targetUserId),
     };
 
+    const scope = scopeFromQuery(req.query);
     const report = await buildAssignedUserReport({
       subjectUserId: targetUserId,
       period,
       projectId: projectId || null,
       organizationId,
+      workspaceId: scope.workspaceId || null,
       recentTasksLimit: 200,
       includeTaskDistribution: true,
       projectAccessDeniedMessage:
@@ -1454,7 +1535,10 @@ function parseOverviewSections(raw) {
 }
 
 async function assertDashboardScope(userId, query) {
-  const result = await buildProjectListFilter(userId, query);
+  const { backfillLegacyProjectWorkspaces } = require("../utils/workspaces");
+  const scope = scopeFromQuery(query);
+  await backfillLegacyProjectWorkspaces(userId, scope);
+  const result = await buildProjectListFilter(userId, scope);
   if (result.error) {
     throw Object.assign(new Error(result.error.message), {
       status: result.error.status,
@@ -1468,19 +1552,6 @@ async function getNotificationPreviewData(userId, query) {
     archived: { $ne: true },
     read: false,
   };
-
-  if (query.organizationId || query.personal === "true") {
-    const projects = await getAccessibleProjectIds(userId, {
-      organizationId: query.organizationId,
-      personal: query.personal,
-    });
-    if (projects.error) {
-      throw Object.assign(new Error(projects.error.message), {
-        status: projects.error.status,
-      });
-    }
-    filter.projectId = { $in: [...projects.ids, null] };
-  }
 
   const rows = await Notification.find(filter)
     .populate("actor", "username email")
@@ -1525,7 +1596,7 @@ const getDashboardOverview = async (req, res) => {
     if (sections.includes("workload")) {
       jobs.push(
         (query.organizationId
-          ? getTeamWorkloadData(query)
+          ? getTeamWorkloadData(userId, query)
           : Promise.resolve({
               members: [],
               totalMembers: 0,
@@ -1588,6 +1659,7 @@ module.exports = {
   getTaskOverview,
   getProjectProgress,
   getTeamWorkload,
+  getTeamWorkloadData,
   getUpcomingDeadlines,
   getMissedDeadlines,
   getProjectBreakdown,

@@ -1,24 +1,31 @@
 "use client";
 
-import { useState } from "react";
+import { useState, Suspense } from "react";
+import { useSearchParams } from "next/navigation";
 import { apiUrl } from "@/lib/validation/api";
 import { useAllowPageScroll } from "@/hooks/useAllowPageScroll";
 import "../login/login.css";
 
-export default function ForgotPasswordPage() {
+function ForgotPasswordInner() {
   useAllowPageScroll();
-  const [email, setEmail] = useState("");
+  const searchParams = useSearchParams();
+  const organizationId = searchParams.get("organizationId") || "";
+  const [email, setEmail] = useState(() => searchParams.get("email") || "");
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
 
   const handleForgotPassword = async () => {
     try {
+      const body: Record<string, string> = { email };
+      // Optional; backend only accepts it after validating membership.
+      if (organizationId) body.organizationId = organizationId;
+
       const response = await fetch(apiUrl("/auth/forgot-password"), {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ email }),
+        body: JSON.stringify(body),
       });
 
       const data = await response.json();
@@ -44,7 +51,9 @@ export default function ForgotPasswordPage() {
         <div className="auth-head">
           <h1>Forgot Password</h1>
           <p>
-            Enter your email address to receive a password reset link.
+            {organizationId
+              ? "Enter your email to receive a reset link for the selected organization. Other organizations keep their passwords."
+              : "Enter your email address to receive a password reset link."}
           </p>
           <div className="rule" />
         </div>
@@ -85,5 +94,13 @@ export default function ForgotPasswordPage() {
       </div>
     </div>
     </>
+  );
+}
+
+export default function ForgotPasswordPage() {
+  return (
+    <Suspense fallback={null}>
+      <ForgotPasswordInner />
+    </Suspense>
   );
 }

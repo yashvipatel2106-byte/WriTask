@@ -21,18 +21,21 @@ import {
   fetchMemberAssignedTasks,
   createCalendarEvent,
   updateCalendarEvent,
-  deleteCalendarEvent,
   fetchOrgMembers,
   fetchOrgProjects,
   syncTasksToCalendar,
+  fetchCalendarWorkspaces,
   type CalendarEventAPI,
   type OrgMemberWithStats,
   type MemberAssignedTask,
   type CreateEventPayload,
   type CalendarProjectOption,
+  type CalendarWorkspaceOption,
 }  from "@/lib/validation/calendarApi";  // adjust path if you place calendarApi.ts elsewhere
 import { useOrganization } from "@/components/context/organizationContext";
+import { readStoredWorkspaceId } from "@/lib/workspaceStorage";
 import { avatarBg, avatarInitials } from "@/lib/avatarColor";
+import { authFetch } from "@/lib/validation/authFetch";
 import { ModalShell } from "@/components/ui/Modal";
 import { confirmDialog } from "@/components/ui/confirm";
 import Select from "@/components/ui/Select";
@@ -56,6 +59,17 @@ const SPACE_FILTER_OPTIONS = [
 
 type EventType = CalendarEventAPI["type"];
 type Priority  = CalendarEventAPI["priority"];
+type CalendarHoliday = {
+  _id: string;
+  name: string;
+  dateKey?: string;
+  date?: string;
+  description?: string;
+  source?: "government" | "manual";
+  isEnabled?: boolean;
+  isRecurring?: boolean;
+  isActive?: boolean;
+};
 
 // "leave" is deliberately excluded — leave events are filtered out of the
 // Team Calendar entirely (see loadData), so no style is needed for them here.
@@ -96,6 +110,22 @@ function toKey(y: number, m: number, d: number) {
 }
 function monthParam(y: number, m: number) {
   return `${y}-${String(m + 1).padStart(2, "0")}`;
+}
+
+function holidayKey(holiday: CalendarHoliday): string {
+  if (holiday.dateKey) return holiday.dateKey.slice(0, 10);
+  if (holiday.date) {
+    // Prefer the date portion when the API returns an ISO string so the
+    // organization holiday does not move to the previous/next day because
+    // of the browser timezone.
+    const directDate = holiday.date.match(/^\d{4}-\d{2}-\d{2}/)?.[0];
+    if (directDate) return directDate;
+    const parsed = new Date(holiday.date);
+    if (!Number.isNaN(parsed.getTime())) {
+      return parsed.toISOString().slice(0, 10);
+    }
+  }
+  return "";
 }
 
 /** Project label for a calendar event — prefers linked task project, then denormalized name. */
@@ -166,18 +196,24 @@ const inputCls = "w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-
 
 // ── EventForm ─────────────────────────────────────────────────────────────
 function EventForm({
-  initial, defaultDate, members, projects, orgId, onSave, onCancel, saving, onDirtyChange,
+  initial, defaultDate, members, projects, orgId, workspaces = [], defaultWorkspaceId, onSave, onCancel, saving, onDirtyChange,
 }: {
   initial?: CalendarEventAPI;
   defaultDate?: string;
   members: OrgMemberWithStats[];
   projects: CalendarProjectOption[];
   orgId: string;
+  workspaces?: CalendarWorkspaceOption[];
+  defaultWorkspaceId?: string;
   onSave: (d: CreateEventPayload) => Promise<void>;
   onCancel: () => void;
   saving: boolean;
   onDirtyChange?: (dirty: boolean) => void;
 }) {
+  const defaultWorkspace =
+    workspaces.find((w) => w.id === defaultWorkspaceId) ||
+    workspaces.find((w) => w.kind === "internal") ||
+    workspaces[0];
   const [form, setForm] = useState<CreateEventPayload>({
     title:       initial?.title       ?? "",
     date:        initial?.date        ?? defaultDate ?? new Date().toISOString().slice(0, 10),
@@ -185,7 +221,8 @@ function EventForm({
     type:        initial?.type        ?? "task",
     priority:    initial?.priority    ?? "medium",
     description: initial?.description ?? "",
-    space:       initial?.space       ?? "Internal",
+    space:       initial?.space       ?? defaultWorkspace?.name ?? "Internal",
+    workspaceId: initial?.workspace   ?? defaultWorkspace?.id ?? defaultWorkspaceId,
     assignees:   initial?.assignees?.map(a => a._id) ?? [],
     projectId:   initial?.taskRef?.project?._id ?? "",
     status:      initial?.taskRef?.status ?? "todo",
@@ -196,6 +233,24 @@ function EventForm({
   // edited, or the blank-create defaults) — compared against the live form
   // to decide whether Close/Cancel should confirm before discarding.
   const initialFormSigRef = useRef(JSON.stringify(form));
+
+  useEffect(() => {
+    if (initial) return;
+    const ws =
+      workspaces.find((w) => w.id === defaultWorkspaceId) ||
+      workspaces.find((w) => w.kind === "internal") ||
+      workspaces[0];
+    if (!ws) return;
+    setForm((f) => {
+      if (f.workspaceId && workspaces.some((w) => w.id === f.workspaceId)) {
+        return f;
+      }
+      const next = { ...f, workspaceId: ws.id, space: ws.name };
+      initialFormSigRef.current = JSON.stringify(next);
+      return next;
+    });
+  }, [workspaces, defaultWorkspaceId, initial]);
+
   const hasUnsavedChanges = JSON.stringify(form) !== initialFormSigRef.current;
 
   useEffect(() => {
@@ -625,9 +680,33 @@ function EventForm({
         <div>
           <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5 block dark:text-slate-400">Space</label>
           <Select
-            value={form.space ?? "Internal"}
-            onChange={(v) => set("space", v)}
-            options={SPACES.map((s) => ({ value: s, label: s }))}
+            value={
+              workspaces.length
+                ? (form.workspaceId ||
+                    workspaces.find(
+                      (w) =>
+                        w.name.toLowerCase() ===
+                        String(form.space || "").toLowerCase()
+                    )?.id ||
+                    defaultWorkspaceId ||
+                    workspaces[0]?.id ||
+                    "")
+                : (form.space ?? "Internal")
+            }
+            onChange={(v) => {
+              const ws = workspaces.find((w) => w.id === v);
+              if (ws) {
+                setForm((f) => ({ ...f, workspaceId: ws.id, space: ws.name }));
+                return;
+              }
+              set("space", v);
+              set("workspaceId", undefined);
+            }}
+            options={
+              workspaces.length
+                ? workspaces.map((w) => ({ value: w.id, label: w.name }))
+                : SPACES.map((s) => ({ value: s, label: s }))
+            }
             className="w-full"
             triggerClassName={(open) =>
               `flex items-center justify-between gap-2 w-full bg-slate-50 border rounded-xl px-4 py-2.5 text-slate-900 text-sm outline-none transition-all cursor-pointer dark:bg-slate-800 dark:text-slate-100 ${
@@ -770,7 +849,13 @@ function CalendarPageInner() {
 
   const [events,  setEvents]  = useState<CalendarEventAPI[]>([]);
   const [members, setMembers] = useState<OrgMemberWithStats[]>([]);
+
+  const [holidays, setHolidays] = useState<CalendarHoliday[]>([]);
+const [holidaysLoading, setHolidaysLoading] = useState(false);
+
   const [projects, setProjects] = useState<CalendarProjectOption[]>([]);
+  const [workspaces, setWorkspaces] = useState<CalendarWorkspaceOption[]>([]);
+  const [activeWorkspaceId, setActiveWorkspaceId] = useState<string | null>(null);
   const [spaceFilter, setSpaceFilter] = useState("all");
 
   const [loading,    setLoading]    = useState(true);
@@ -806,7 +891,8 @@ function CalendarPageInner() {
   const [breakdownTasks, setBreakdownTasks] = useState<MemberAssignedTask[]>([]);
   const [breakdownLoading, setBreakdownLoading] = useState(false);
   const [toast,        setToast]        = useState<string | null>(null);
-  const [filterType,   setFilterType]   = useState<EventType | "all" | "high-priority">("all");
+  const [filterType, setFilterType] =
+  useState<EventType | "all" | "high-priority" | "holiday">("all");
   const [searchQuery,  setSearchQuery]  = useState("");
   const [myTasksOnly,  setMyTasksOnly]  = useState(false);
 
@@ -852,12 +938,13 @@ function CalendarPageInner() {
     setApiError(null);
     try {
       const mp = monthParam(y, m);
-      const [evts, mems, projs] = await Promise.all([
+      const [evts, mems, projs, spaces] = await Promise.all([
         // Shared Team Calendar — every org member's events, not just this
         // user's own. "Mine only" (myTasksOnly) then filters client-side.
         fetchCalendarEvents(oId, mp, space, true),
         fetchOrgMembers(oId, mp),
         fetchOrgProjects(oId),
+        fetchCalendarWorkspaces(oId).catch(() => [] as CalendarWorkspaceOption[]),
       ]);
       // Leave events (created by the leave-approval flow) are deliberately
       // excluded from the Team Calendar — that functionality lives entirely
@@ -868,6 +955,8 @@ function CalendarPageInner() {
       // assignee pickers don't show the same person twice.
       setMembers([...new Map(mems.map((m) => [m.user._id, m])).values()]);
       setProjects(projs);
+      setWorkspaces(spaces);
+      setActiveWorkspaceId(readStoredWorkspaceId());
     } catch (e: any) {
       setApiError(e.message ?? "Failed to load calendar data");
     } finally {
@@ -891,7 +980,88 @@ function CalendarPageInner() {
   // };
 
   // initializeCalendar();
-}, [orgId, year, month, spaceFilter, loadData]);
+  }, [orgId, year, month, spaceFilter, loadData]);
+
+  // ── load organization holidays for selected calendar year ─────────────
+useEffect(() => {
+  if (!orgId) {
+    setHolidays([]);
+    setHolidaysLoading(false);
+    return;
+  }
+
+  let cancelled = false;
+
+  const loadHolidays = async () => {
+    setHolidaysLoading(true);
+
+    try {
+      const res = await authFetch(
+        `/organizations/${orgId}/holidays?year=${year}`
+      );
+
+      const data = await res.json().catch(() => ({}));
+
+      if (cancelled) return;
+
+      if (!res.ok) {
+        throw new Error(
+          data.message || "Failed to load organization holidays"
+        );
+      }
+
+      const holidayList: CalendarHoliday[] = Array.isArray(data.holidays)
+        ? data.holidays
+            .filter(
+              (holiday: CalendarHoliday) =>
+                holiday.isEnabled !== false
+            )
+            .sort((a: CalendarHoliday, b: CalendarHoliday) => {
+              const dateA = holidayKey(a);
+              const dateB = holidayKey(b);
+
+              return dateA.localeCompare(dateB);
+            })
+        : [];
+
+      setHolidays(holidayList);
+    } catch (error) {
+      if (!cancelled) {
+        console.error("Calendar holidays load error:", error);
+        setHolidays([]);
+      }
+    } finally {
+      if (!cancelled) {
+        setHolidaysLoading(false);
+      }
+    }
+  };
+
+  void loadHolidays();
+
+  const onWorkspaceChange = () => {
+    void loadHolidays();
+  };
+
+  window.addEventListener("workspace-changed", onWorkspaceChange);
+
+  return () => {
+    cancelled = true;
+    window.removeEventListener(
+      "workspace-changed",
+      onWorkspaceChange
+    );
+  };
+}, [orgId, year]);
+
+  useEffect(() => {
+    const onWorkspaceChange = () => {
+      if (!orgId) return;
+      void loadData(orgId, year, month, spaceFilter);
+    };
+    window.addEventListener("workspace-changed", onWorkspaceChange);
+    return () => window.removeEventListener("workspace-changed", onWorkspaceChange);
+  }, [orgId, year, month, spaceFilter, loadData]);
 
 // Loads the selected member's assigned tasks (all) plus month-scoped
 // meetings/reminders for the breakdown modal.
@@ -950,32 +1120,55 @@ const meetingStatus = viewEvent?.meeting?.status;
   // ── filtered events ───────────────────────────────────────────────────────
   const searchNeedle = searchQuery.trim().toLowerCase();
   const filteredEvents = events.filter(e => {
-    if (filterType === "high-priority") {
-      if (e.priority !== "high") return false;
-    } else if (filterType !== "all" && e.type !== filterType) return false;
-    if (searchNeedle) {
-      const haystack = [
-        e.title,
-        e.description,
-        e.type,
-        e.priority,
-        e.space,
-        eventProjectName(e),
-        ...(e.assignees || []).map((a) => a.username),
-        typeof e.createdBy === "object" ? e.createdBy?.username : "",
-      ]
-        .filter(Boolean)
-        .join(" ")
-        .toLowerCase();
-      if (!haystack.includes(searchNeedle)) return false;
+  // Holidays are stored separately from normal calendar events.
+  // Therefore, when Holiday filter is selected, hide all events.
+  if (filterType === "holiday") {
+    return false;
+  }
+
+  if (filterType === "high-priority") {
+    if (e.priority !== "high") return false;
+  } else if (
+    filterType !== "all" &&
+    e.type !== filterType
+  ) {
+    return false;
+  }
+
+  if (searchNeedle) {
+    const haystack = [
+      e.title,
+      e.description,
+      e.type,
+      e.priority,
+      e.space,
+      eventProjectName(e),
+      ...(e.assignees || []).map((a) => a.username),
+      typeof e.createdBy === "object"
+        ? e.createdBy?.username
+        : "",
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+
+    if (!haystack.includes(searchNeedle)) {
+      return false;
     }
-    if (myTasksOnly && currentUserId.current) {
-      // "Mine only" = assigned to me specifically — not just created by me.
-      const isAssigned = e.assignees.some(a => a._id === currentUserId.current);
-      if (!isAssigned) return false;
+  }
+
+  if (myTasksOnly && currentUserId.current) {
+    const isAssigned = e.assignees.some(
+      a => a._id === currentUserId.current
+    );
+
+    if (!isAssigned) {
+      return false;
     }
-    return true;
-  });
+  }
+
+  return true;
+});
 
   const eventMap: Record<string, CalendarEventAPI[]> = {};
   filteredEvents.forEach(e => {
@@ -983,12 +1176,41 @@ const meetingStatus = viewEvent?.meeting?.status;
     eventMap[e.date].push(e);
   });
 
+  // Organization holidays are intentionally kept separate from calendar
+  // events. This means event type filters, search, statistics, CRUD and
+  // "Mine only" continue to work exactly as before, while holidays remain
+  // visible as organization-wide calendar information.
+ const holidayMap: Record<string, CalendarHoliday[]> = {};
+
+holidays.forEach((holiday) => {
+  const key = holidayKey(holiday);
+
+  if (!key) return;
+
+  if (!holidayMap[key]) {
+    holidayMap[key] = [];
+  }
+
+  holidayMap[key].push(holiday);
+});
+
+const showHolidays =
+  filterType === "all" || filterType === "holiday";
+
   // ── CRUD handlers ─────────────────────────────────────────────────────────
   const handleCreate = async (data: CreateEventPayload) => {
     setSaving(true);
     try {
       const created = await createCalendarEvent(orgId, data);
-      setEvents((p) => [...p, created]);
+      const currentWs = readStoredWorkspaceId();
+      const belongsToCurrent =
+        !currentWs ||
+        String(created.workspace || "") === currentWs ||
+        created.space ===
+          workspaces.find((w) => w.id === currentWs)?.name;
+      if (belongsToCurrent) {
+        setEvents((p) => [...p, created]);
+      }
       setShowCreate(false);
       showToast("Event added ✓");
     } catch (e: any) {
@@ -1006,7 +1228,17 @@ const meetingStatus = viewEvent?.meeting?.status;
     setSaving(true);
     try {
       const updated = await updateCalendarEvent(orgId, editEvent._id, data);
-      setEvents((p) => p.map((e) => (e._id === updated._id ? updated : e)));
+      const currentWs = readStoredWorkspaceId();
+      const belongsToCurrent =
+        !currentWs ||
+        String(updated.workspace || "") === currentWs ||
+        updated.space ===
+          workspaces.find((w) => w.id === currentWs)?.name;
+      setEvents((p) =>
+        belongsToCurrent
+          ? p.map((e) => (e._id === updated._id ? updated : e))
+          : p.filter((e) => e._id !== updated._id)
+      );
       setEditEvent(null);
       showToast("Event updated ✓");
     } catch (e: any) {
@@ -1018,17 +1250,6 @@ const meetingStatus = viewEvent?.meeting?.status;
     }
   };
 
-  const handleDelete = async (id: string) => {
-    try {
-      await deleteCalendarEvent(orgId, id);
-      setEvents(p => p.filter(e => e._id !== id));
-      setViewEvent(null);
-      setEditEvent(null);
-      showToast("Event removed");
-    } catch (e: any) {
-      showToast("Error: " + e.message);
-    }
-  };
   const handleStartMeeting = async (event: CalendarEventAPI) => {
     try {
       const res = await startMeeting(orgId, event._id);
@@ -1130,7 +1351,15 @@ const meetingStatus = viewEvent?.meeting?.status;
   };
 
   // ── derived ───────────────────────────────────────────────────────────────
-  const selectedEvents = selectedDate ? (eventMap[selectedDate] || []) : [];
+  const selectedEvents =
+  selectedDate && filterType !== "holiday"
+    ? (eventMap[selectedDate] || [])
+    : [];
+
+const selectedHolidays =
+  selectedDate && showHolidays
+    ? (holidayMap[selectedDate] || [])
+    : [];
   const upcomingEvents = filteredEvents
     .filter(e => e.date >= todayKey)
     .sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time))
@@ -1190,8 +1419,24 @@ const meetingStatus = viewEvent?.meeting?.status;
                     const needle = next.trim().toLowerCase();
                     if (!needle) return;
                     const match = events.find((ev) => {
-                      if (filterType === "high-priority" && ev.priority !== "high") return false;
-                      if (filterType !== "all" && filterType !== "high-priority" && ev.type !== filterType) return false;
+                     if (filterType === "holiday") {
+  return false;
+}
+
+if (
+  filterType === "high-priority" &&
+  ev.priority !== "high"
+) {
+  return false;
+}
+
+if (
+  filterType !== "all" &&
+  filterType !== "high-priority" &&
+  ev.type !== filterType
+) {
+  return false;
+}
                       if (myTasksOnly && currentUserId.current) {
                         if (!ev.assignees.some((a) => a._id === currentUserId.current)) return false;
                       }
@@ -1230,24 +1475,35 @@ const meetingStatus = viewEvent?.meeting?.status;
                 </span>
               )}
               {/* Type filter */}
-              <div className="flex items-center gap-1.5 bg-white border border-slate-200 rounded-xl px-3 py-2 dark:bg-slate-900 dark:border-slate-800">
-                <Filter size={12} className="text-slate-400 dark:text-slate-500" />
+              <div className="relative">
+                <Filter
+                  size={12}
+                  className="absolute left-3 top-1/2 -translate-y-1/2 z-10 pointer-events-none text-slate-400 dark:text-slate-500"
+                />
                 <Select
                   value={filterType}
-                  onChange={(v) => setFilterType(v as EventType | "all" | "high-priority")}
+                  onChange={(v) =>
+                    setFilterType(
+                      v as EventType | "all" | "high-priority" | "holiday"
+                    )
+                  }
                   options={[
                     { value: "all", label: "All types" },
                     { value: "task", label: "Tasks" },
                     { value: "meeting", label: "Meetings" },
                     { value: "reminder", label: "Reminders" },
                     { value: "high-priority", label: "High Priority" },
+                    { value: "holiday", label: "Holidays" },
                   ]}
+                  className="w-[150px]"
                   triggerClassName={(open) =>
-                    `flex items-center gap-1.5 bg-transparent text-sm outline-none cursor-pointer transition-colors ${
-                      open ? "text-cyan-600 dark:text-cyan-400" : "text-slate-600 dark:text-slate-300"
+                    `flex items-center justify-between gap-1.5 w-full bg-white border border-slate-200 rounded-xl pl-8 pr-3 py-2 text-sm text-slate-600 outline-none cursor-pointer transition-colors dark:bg-slate-900 dark:border-slate-800 dark:text-slate-300 ${
+                      open
+                        ? "border-cyan-400 ring-1 ring-cyan-500/20 dark:border-cyan-500"
+                        : "hover:border-slate-300 dark:hover:border-slate-700"
                     }`
                   }
-                  menuClassName="min-w-[160px]"
+                  menuClassName="min-w-[150px]"
                 />
               </div>
               {/* Space filter */}
@@ -1256,7 +1512,17 @@ const meetingStatus = viewEvent?.meeting?.status;
                 <Select
                   value={spaceFilter}
                   onChange={setSpaceFilter}
-                  options={SPACE_FILTER_OPTIONS}
+                  options={
+                    workspaces.length
+                      ? [
+                          { value: "all", label: "All Spaces" },
+                          ...workspaces.map((w) => ({
+                            value: w.name,
+                            label: w.name,
+                          })),
+                        ]
+                      : SPACE_FILTER_OPTIONS
+                  }
                   triggerClassName={(open) =>
                     `flex items-center gap-1.5 bg-transparent text-sm outline-none cursor-pointer transition-colors ${
                       open ? "text-cyan-600 dark:text-cyan-400" : "text-slate-600 dark:text-slate-300"
@@ -1400,53 +1666,132 @@ const meetingStatus = viewEvent?.meeting?.status;
               <div className="grid grid-cols-7 gap-1">
                 {cells.map((day, i) => {
                   if (!day) return <div key={i} className="h-24 rounded-xl" />;
-                  const key        = toKey(year, month, day);
-                  const isToday    = key === todayKey;
+
+                  const key = toKey(year, month, day);
+                  const isToday = key === todayKey;
                   const isSelected = key === selectedDate;
-                  const dayEvents  = eventMap[key] || [];
+                  const dayEvents =
+  filterType === "holiday"
+    ? []
+    : eventMap[key] || [];
+
+const dayHolidays =
+  showHolidays
+    ? holidayMap[key] || []
+    : [];
+
                   return (
                     <div
                       key={i}
                       onClick={() => setSelectedDate(isSelected ? null : key)}
                       className={`h-24 rounded-xl p-1.5 cursor-pointer transition-all flex flex-col gap-0.5 ${
-                        isSelected ? "bg-cyan-500/15 ring-1 ring-cyan-500/50"
-                        : isToday  ? "bg-slate-100 ring-1 ring-cyan-300 dark:bg-slate-800 dark:ring-cyan-500/40"
-                        : "bg-slate-50 hover:bg-slate-100 dark:bg-slate-800/60 dark:hover:bg-slate-800"
+                        isSelected
+                          ? "bg-cyan-500/15 ring-1 ring-cyan-500/50"
+                          : isToday
+                          ? "bg-slate-100 ring-1 ring-cyan-300 dark:bg-slate-800 dark:ring-cyan-500/40"
+                          : dayHolidays.length > 0
+                          ? "bg-orange-50/70 hover:bg-orange-50 dark:bg-orange-500/5 dark:hover:bg-orange-500/10"
+                          : "bg-slate-50 hover:bg-slate-100 dark:bg-slate-800/60 dark:hover:bg-slate-800"
                       }`}
                     >
-                      <span className={`text-xs font-bold w-6 h-6 flex items-center justify-center rounded-full self-start ${isToday ? "bg-cyan-400 text-[#020B2A]" : "text-slate-600 dark:text-slate-300"}`}>
-                        {day}
-                      </span>
+                      <div className="flex items-center justify-between">
+                        <span
+                          className={`text-xs font-bold w-6 h-6 flex items-center justify-center rounded-full self-start ${
+                            isToday
+                              ? "bg-cyan-400 text-[#020B2A]"
+                              : "text-slate-600 dark:text-slate-300"
+                          }`}
+                        >
+                          {day}
+                        </span>
+
+                        {dayHolidays.length > 0 && (
+                          <span
+                            className="w-2 h-2 rounded-full bg-orange-500 shrink-0 mr-0.5"
+                            title={
+                              dayHolidays.length === 1
+                                ? dayHolidays[0].name
+                                : `${dayHolidays.length} organization holidays`
+                            }
+                          />
+                        )}
+                      </div>
+
                       <div className="flex flex-col gap-0.5 overflow-hidden flex-1">
-                        {dayEvents.slice(0, 2).map(e => (
+                        {dayEvents.slice(0, 2).map((e) => (
                           <div
                             key={e._id}
-                            onClick={ev => { ev.stopPropagation(); setViewEvent(e); }}
+                            onClick={(ev) => {
+                              ev.stopPropagation();
+                              setViewEvent(e);
+                            }}
                             className={`text-[10px] truncate px-1.5 py-0.5 rounded-md ${typeStyle(e.type).bg} ${typeStyle(e.type).text} font-medium cursor-pointer hover:opacity-80`}
-                            title={eventProjectName(e) ? `${e.title} · ${eventProjectName(e)}` : e.title}
+                            title={
+                              eventProjectName(e)
+                                ? `${e.title} · ${eventProjectName(e)}`
+                                : e.title
+                            }
                           >
                             {e.meeting?.status === "live" && (
-                              <span className="mr-0.5 text-emerald-600 dark:text-emerald-400">●</span>
+                              <span className="mr-0.5 text-emerald-600 dark:text-emerald-400">
+                                ●
+                              </span>
                             )}
                             {e.taskRef && <span className="mr-0.5 opacity-60">◆</span>}
                             {e.title}
                             {eventProjectName(e) ? (
-                              <span className="opacity-70 font-normal"> · {eventProjectName(e)}</span>
+                              <span className="opacity-70 font-normal">
+                                {" "}
+                                · {eventProjectName(e)}
+                              </span>
                             ) : null}
                           </div>
                         ))}
-                        {dayEvents.length > 2 && <div className="text-[10px] text-slate-400 px-1 dark:text-slate-500">+{dayEvents.length - 2} more</div>}
+
+                        {dayHolidays.slice(0, 1).map((holiday) => (
+                          <div
+                            key={`holiday-cell-${holiday._id}`}
+                            onClick={(ev) => {
+                              ev.stopPropagation();
+                              setSelectedDate(key);
+                            }}
+                            className="text-[10px] truncate px-1.5 py-0.5 rounded-md bg-orange-100 text-orange-700 border border-orange-200 font-semibold cursor-pointer hover:bg-orange-200/80 dark:bg-orange-500/10 dark:text-orange-400 dark:border-orange-500/20 dark:hover:bg-orange-500/20"
+                            title={
+                              holiday.description
+                                ? `${holiday.name} · ${holiday.description}`
+                                : holiday.name
+                            }
+                          >
+                            <span className="mr-1">◆</span>
+                            {holiday.name}
+                          </div>
+                        ))}
+
+                        {(dayEvents.length > 2 || dayHolidays.length > 1) && (
+                          <div className="text-[10px] text-slate-400 px-1 dark:text-slate-500">
+                            +{Math.max(0, dayEvents.length - 2) + Math.max(0, dayHolidays.length - 1)} more
+                          </div>
+                        )}
                       </div>
+
                       {dayEvents.length > 0 && (
                         <div className="flex -space-x-1 mt-auto">
-                          {[...new Map(dayEvents.flatMap(e => e.assignees).map(u => [u._id, u])).values()].slice(0, 3).map(u => (
-                            <div
-                              key={u._id}
-                              className={`w-3.5 h-3.5 ${avatarBg(u.avatarColor, u._id).className} rounded-full ring-1 ring-white dark:ring-slate-900`}
-                              style={avatarBg(u.avatarColor, u._id).style}
-                              title={u.username}
-                            />
-                          ))}
+                          {[
+                            ...new Map(
+                              dayEvents
+                                .flatMap((e) => e.assignees)
+                                .map((u) => [u._id, u])
+                            ).values(),
+                          ]
+                            .slice(0, 3)
+                            .map((u) => (
+                              <div
+                                key={u._id}
+                                className={`w-3.5 h-3.5 ${avatarBg(u.avatarColor, u._id).className} rounded-full ring-1 ring-white dark:ring-slate-900`}
+                                style={avatarBg(u.avatarColor, u._id).style}
+                                title={u.username}
+                              />
+                            ))}
                         </div>
                       )}
                     </div>
@@ -1455,13 +1800,29 @@ const meetingStatus = viewEvent?.meeting?.status;
               </div>
 
               {/* Legend */}
-              <div className="flex gap-5 mt-4 pt-4 border-t border-slate-200 dark:border-slate-800">
+              <div className="flex flex-wrap items-center gap-x-5 gap-y-2 mt-4 pt-4 border-t border-slate-200 dark:border-slate-800">
                 {(Object.entries(TYPE_STYLES) as [EventType, { bg: string; text: string; dot: string; border: string }][]).map(([type, s]) => (
                   <div key={type} className="flex items-center gap-1.5 text-xs text-slate-500 capitalize dark:text-slate-400">
                     <span className={`w-2 h-2 rounded-full ${s.dot}`} /> {type}
-                    {type === "task" && <span className="text-[9px] text-slate-400 ml-0.5 dark:text-slate-500">(◆ = from task)</span>}
+                    {type === "task" && (
+                      <span className="text-[9px] text-slate-400 ml-0.5 dark:text-slate-500">
+                        (◆ = from task)
+                      </span>
+                    )}
                   </div>
                 ))}
+
+                <div className="flex items-center gap-1.5 text-xs text-orange-600 dark:text-orange-400">
+                  <span className="w-2 h-2 rounded-full bg-orange-500" />
+                  Organization holiday
+                </div>
+
+                {holidaysLoading && (
+                  <span className="flex items-center gap-1.5 text-[10px] text-slate-400 dark:text-slate-500">
+                    <Loader2 size={11} className="animate-spin" />
+                    Loading holidays…
+                  </span>
+                )}
               </div>
             </div>
 
@@ -1479,10 +1840,53 @@ const meetingStatus = viewEvent?.meeting?.status;
                       <Plus size={12} />
                     </button>
                   </div>
-                  {selectedEvents.length === 0 ? (
-                    <p className="text-slate-400 text-xs dark:text-slate-500">No events. Click + to add one.</p>
+                  {selectedHolidays.length === 0 && selectedEvents.length === 0 ? (
+                    <p className="text-slate-400 text-xs dark:text-slate-500">
+                      No events or organization holidays. Click + to add an event.
+                    </p>
                   ) : (
-                    <div className="space-y-2">
+                    <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+                      {/* Organization holidays are shown before normal events so
+                          the holiday is immediately visible for the selected date. */}
+                      {selectedHolidays.map((holiday) => (
+                        <div
+                          key={`selected-holiday-${holiday._id}`}
+                          className="p-3 rounded-xl bg-orange-50 border border-orange-200 dark:bg-orange-500/10 dark:border-orange-500/20"
+                        >
+                          <div className="flex items-start gap-2">
+                            <div className="w-7 h-7 rounded-lg bg-orange-100 flex items-center justify-center shrink-0 dark:bg-orange-500/15">
+                              <CalIcon size={13} className="text-orange-600 dark:text-orange-400" />
+                            </div>
+                            <div className="min-w-0 flex-1">
+                              <p className="font-semibold text-xs text-orange-700 dark:text-orange-400 leading-tight">
+                                {holiday.name}
+                              </p>
+                              <div className="flex flex-wrap items-center gap-1.5 mt-1">
+                                <span className="text-[10px] font-medium text-orange-600 dark:text-orange-400">
+                                  Organization Holiday
+                                </span>
+                                {holiday.source && (
+                                  <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-orange-100 text-orange-700 dark:bg-orange-500/15 dark:text-orange-400">
+                                    {holiday.source === "government" ? "Public Holiday" : "Custom"}
+                                  </span>
+                                )}
+                                {holiday.isRecurring && (
+                                  <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400">
+                                    Recurring
+                                  </span>
+                                )}
+                              </div>
+                              {holiday.description && (
+                                <p className="text-[10px] text-slate-500 mt-1.5 leading-relaxed dark:text-slate-400">
+                                  {holiday.description}
+                                </p>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+
+                      {/* Normal calendar events */}
                       {selectedEvents.map(e => (
                         <div
                           key={e._id}
@@ -1500,9 +1904,6 @@ const meetingStatus = viewEvent?.meeting?.status;
                                   Live
                                 </span>
                               )}
-                              <button onClick={ev => { ev.stopPropagation(); handleDelete(e._id); }} className="p-0.5 rounded hover:bg-slate-100 text-slate-400 hover:text-red-500 transition-colors dark:hover:bg-slate-800 dark:text-slate-500 dark:hover:text-red-400">
-                                <X size={10} />
-                              </button>
                             </div>
                           </div>
                           {eventProjectName(e) && (
@@ -1627,6 +2028,8 @@ const meetingStatus = viewEvent?.meeting?.status;
             members={members}
             projects={projects}
             orgId={orgId}
+            workspaces={workspaces}
+            defaultWorkspaceId={activeWorkspaceId || undefined}
             onSave={handleCreate}
             onCancel={() => closeEventForm(() => setShowCreate(false))}
             onDirtyChange={setEventFormDirty}
@@ -1642,6 +2045,8 @@ const meetingStatus = viewEvent?.meeting?.status;
             members={members}
             projects={projects}
             orgId={orgId}
+            workspaces={workspaces}
+            defaultWorkspaceId={activeWorkspaceId || undefined}
             onSave={handleEdit}
             onCancel={() => closeEventForm(() => setEditEvent(null))}
             onDirtyChange={setEventFormDirty}
@@ -1971,14 +2376,6 @@ const meetingStatus = viewEvent?.meeting?.status;
     </button>
   )}
 
-  {isCurrentUserCreator && (
-    <button
-      onClick={() => handleDelete(viewEvent._id)}
-      className="btn btn-danger flex-1"
-    >
-      Delete
-    </button>
-  )}
 
 </div>
           </div>

@@ -16,7 +16,12 @@ import {
   markNotificationRead,
   type NotificationItem,
 } from "@/lib/notifications";
-import { fetchUsersOnLeaveRange, type OnLeaveEntry } from "@/lib/validation/leaveApi";
+import {
+  fetchUsersOnLeave,
+  fetchUsersOnLeaveRange,
+  type OnLeaveEntry,
+} from "@/lib/validation/leaveApi";
+import { appendWorkspaceScope } from "@/lib/workspaceStorage";
 import {
   FolderKanban,
   ClipboardList,
@@ -68,6 +73,19 @@ type DashboardStats = {
   totalTasks: number;
   totalMembers: number;
   completionRate: number;
+};
+
+type DashboardHoliday = {
+  _id: string;
+  name: string;
+  date: string;
+  dateKey?: string;
+  year?: number;
+  description?: string;
+  country?: string;
+  state?: string;
+  source?: string;
+  isEnabled?: boolean;
 };
 
 type TeamMember = {
@@ -122,6 +140,13 @@ export default function Dashboard() {
     dispatch(clearDashboardCharts());
     dispatch(fetchTaskOverview(orgId));
     dispatch(fetchProjectProgress(orgId));
+    const onWorkspaceChange = () => {
+      dispatch(clearDashboardCharts());
+      dispatch(fetchTaskOverview(orgId));
+      dispatch(fetchProjectProgress(orgId));
+    };
+    window.addEventListener("workspace-changed", onWorkspaceChange);
+    return () => window.removeEventListener("workspace-changed", onWorkspaceChange);
   }, [dispatch, orgId, orgReady]);
 
   // ── stats ─────────────────────────────────────────────────────────────
@@ -160,6 +185,11 @@ const [workloadSummary, setWorkloadSummary] = useState({
   // ── upcoming deadlines ────────────────────────────────────────────────
   const [deadlines, setDeadlines] = useState<DeadlineTask[]>([]);
 
+  // ── organization holidays ────────────────────────────────────────────
+const [holidays, setHolidays] = useState<DashboardHoliday[]>([]);
+const [holidayIndex, setHolidayIndex] = useState(0);
+const [holidaysLoading, setHolidaysLoading] = useState(false);
+
   // ── missed deadlines ──────────────────────────────────────────────────
   const [missedDeadlines, setMissedDeadlines] = useState<DeadlineTask[]>([]);
   const [missedLoading, setMissedLoading] = useState(false);
@@ -169,15 +199,27 @@ const [workloadSummary, setWorkloadSummary] = useState({
   const [upcomingOnLeave, setUpcomingOnLeave] = useState<OnLeaveEntry[]>([]);
   const [onLeaveLoading, setOnLeaveLoading] = useState(true);
 
+  // Calendar-specific On Leave list.
+  // Uses the selected calendar date, or today when no date is selected.
+  const [calendarOnLeave, setCalendarOnLeave] = useState<OnLeaveEntry[]>([]);
+  const [calendarOnLeaveLoading, setCalendarOnLeaveLoading] = useState(false);
+
   // ── calendar state ────────────────────────────────────────────────────
   const calToday    = new Date();
   const calTodayKey = calToday.toISOString().slice(0, 10);
 
   const [calYear,  setCalYear]  = useState(calToday.getFullYear());
-  const [calMonth, setCalMonth] = useState(calToday.getMonth());
-  const [calEvents, setCalEvents]           = useState<CalendarEventAPI[]>([]);
-  const [calLoading, setCalLoading]         = useState(false);
-  const [calSelectedDate, setCalSelectedDate] = useState<string | null>(null);
+const [calMonth, setCalMonth] = useState(calToday.getMonth());
+const [calEvents, setCalEvents] = useState<CalendarEventAPI[]>([]);
+const [calLoading, setCalLoading] = useState(false);
+const [calSelectedDate, setCalSelectedDate] = useState<string | null>(null);
+
+// Selected date used by the lower calendar information panels.
+const calInfoDate = calSelectedDate || calTodayKey;
+
+// ── calendar organization holidays ──────────────────────────────────
+const [calendarHolidays, setCalendarHolidays] = useState<DashboardHoliday[]>([]);
+const [calendarHolidaysLoading, setCalendarHolidaysLoading] = useState(false);
 
   const loadCalendarEvents = useCallback(async (y: number, m: number) => {
     if (!orgId) return;
@@ -194,7 +236,144 @@ const [workloadSummary, setWorkloadSummary] = useState({
 
   useEffect(() => {
     loadCalendarEvents(calYear, calMonth);
+    const onWorkspaceChange = () => loadCalendarEvents(calYear, calMonth);
+    window.addEventListener("workspace-changed", onWorkspaceChange);
+    return () => window.removeEventListener("workspace-changed", onWorkspaceChange);
   }, [calYear, calMonth, loadCalendarEvents]);
+
+
+  // ── organization holidays for selected calendar year ────────────────
+useEffect(() => {
+  if (!orgId || !orgReady) {
+    setCalendarHolidays([]);
+    setCalendarHolidaysLoading(false);
+    return;
+  }
+
+  let cancelled = false;
+
+  const loadCalendarHolidays = async () => {
+    setCalendarHolidaysLoading(true);
+
+    try {
+      const res = await authFetch(
+        `/organizations/${orgId}/holidays?year=${calYear}`
+      );
+
+      const data = await res.json().catch(() => ({}));
+
+      if (cancelled) return;
+
+      if (!res.ok) {
+        throw new Error(
+          data.message || "Failed to load organization holidays"
+        );
+      }
+const holidayList: DashboardHoliday[] =
+  Array.isArray(data.holidays)
+    ? data.holidays
+        .filter(
+          (holiday: DashboardHoliday) =>
+            holiday.isEnabled !== false
+        )
+        .sort(
+          (
+            a: DashboardHoliday,
+            b: DashboardHoliday,
+          ) => {
+            const dateA =
+              a.dateKey ||
+              new Date(a.date)
+                .toISOString()
+                .slice(0, 10);
+
+            const dateB =
+              b.dateKey ||
+              new Date(b.date)
+                .toISOString()
+                .slice(0, 10);
+
+            return dateA.localeCompare(dateB);
+          }
+        )
+    : [];
+
+      setCalendarHolidays(holidayList);
+    } catch (error) {
+      if (!cancelled) {
+        console.error(
+          "Calendar holidays load error:",
+          error
+        );
+
+        setCalendarHolidays([]);
+      }
+    } finally {
+      if (!cancelled) {
+        setCalendarHolidaysLoading(false);
+      }
+    }
+  };
+
+  void loadCalendarHolidays();
+
+  const onWorkspaceChange = () => {
+    void loadCalendarHolidays();
+  };
+
+  window.addEventListener(
+    "workspace-changed",
+    onWorkspaceChange
+  );
+
+  return () => {
+    cancelled = true;
+
+    window.removeEventListener(
+      "workspace-changed",
+      onWorkspaceChange
+    );
+  };
+}, [orgId, orgReady, calYear]);
+
+  // ── calendar On Leave for selected date ───────────────────────────────
+  useEffect(() => {
+    if (!orgId || !orgReady || !calInfoDate) {
+      setCalendarOnLeave([]);
+      setCalendarOnLeaveLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+
+    const loadCalendarOnLeave = async () => {
+      setCalendarOnLeaveLoading(true);
+
+      try {
+        const entries = await fetchUsersOnLeave(orgId, calInfoDate);
+
+        if (cancelled) return;
+
+        setCalendarOnLeave(Array.isArray(entries) ? entries : []);
+      } catch (error) {
+        if (!cancelled) {
+          console.error("Calendar On Leave load error:", error);
+          setCalendarOnLeave([]);
+        }
+      } finally {
+        if (!cancelled) {
+          setCalendarOnLeaveLoading(false);
+        }
+      }
+    };
+
+    void loadCalendarOnLeave();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [orgId, orgReady, calInfoDate]);
+
 
   const calPrevMonth = () => {
     if (calMonth === 0) { setCalYear(y => y - 1); setCalMonth(11); }
@@ -221,9 +400,34 @@ const [workloadSummary, setWorkloadSummary] = useState({
     calEventMap[e.date].push(e);
   });
 
+
+  // ── organization holiday map ────────────────────────────────────────
+const calHolidayMap: Record<string, DashboardHoliday[]> = {};
+
+calendarHolidays.forEach((holiday) => {
+  const key =
+    holiday.dateKey ||
+    new Date(holiday.date).toISOString().slice(0, 10);
+
+  if (!calHolidayMap[key]) {
+    calHolidayMap[key] = [];
+  }
+
+  calHolidayMap[key].push(holiday);
+});
+
   const calTodayEvents   = calEventMap[calTodayKey] || [];
   const calTodayTasks    = calTodayEvents.filter(e => e.type === "task");
-  const calSelectedEvents = calSelectedDate ? (calEventMap[calSelectedDate] || []) : [];
+  const calSelectedEvents = calSelectedDate
+    ? (calEventMap[calSelectedDate] || [])
+    : [];
+  const calSelectedHolidays = calSelectedDate
+    ? calHolidayMap[calSelectedDate] || []
+    : [];
+
+  // Holiday shown below Today's Events follows the selected date.
+  const calInfoHolidays = calHolidayMap[calInfoDate] || [];
+
 
   // ── main data fetch ───────────────────────────────────────────────────
   useEffect(() => {
@@ -256,6 +460,7 @@ const [workloadSummary, setWorkloadSummary] = useState({
         } else {
           overviewParams.set("personal", "true");
         }
+        appendWorkspaceScope(overviewParams);
 
         setMissedLoading(true);
         const overviewRes = await authFetch(
@@ -318,9 +523,12 @@ const [workloadSummary, setWorkloadSummary] = useState({
     };
 
     void load();
+    const onWorkspaceChange = () => void load();
 
+    window.addEventListener("workspace-changed", onWorkspaceChange);
     return () => {
       cancelled = true;
+      window.removeEventListener("workspace-changed", onWorkspaceChange);
     };
   }, [router, orgId, orgReady]);
 
@@ -356,6 +564,103 @@ const [workloadSummary, setWorkloadSummary] = useState({
     };
   }, [orgId, orgReady]);
 
+  // ── organization holidays ────────────────────────────────────────────
+useEffect(() => {
+  if (!orgId || !orgReady) {
+    setHolidays([]);
+    setHolidayIndex(0);
+    setHolidaysLoading(false);
+    return;
+  }
+
+  let cancelled = false;
+
+  const loadHolidays = async () => {
+    setHolidaysLoading(true);
+
+    try {
+      const year = new Date().getFullYear();
+
+      const res = await authFetch(
+        `/organizations/${orgId}/holidays?year=${year}`
+      );
+
+      const data = await res.json().catch(() => ({}));
+
+      if (cancelled) return;
+
+      if (!res.ok) {
+        throw new Error(data.message || "Failed to load holidays");
+      }
+
+      const holidayList: DashboardHoliday[] = Array.isArray(data.holidays)
+        ? data.holidays
+            .filter(
+              (holiday: DashboardHoliday) =>
+                holiday.isEnabled !== false
+            )
+            .sort((a: DashboardHoliday, b: DashboardHoliday) => {
+              const dateA = new Date(a.date).getTime();
+              const dateB = new Date(b.date).getTime();
+
+              return dateA - dateB;
+            })
+        : [];
+
+      setHolidays(holidayList);
+      setHolidayIndex(0);
+    } catch (error) {
+      if (!cancelled) {
+        console.error("Dashboard holidays load error:", error);
+        setHolidays([]);
+        setHolidayIndex(0);
+      }
+    } finally {
+      if (!cancelled) {
+        setHolidaysLoading(false);
+      }
+    }
+  };
+
+  void loadHolidays();
+
+  const onWorkspaceChange = () => {
+    void loadHolidays();
+  };
+
+  window.addEventListener(
+    "workspace-changed",
+    onWorkspaceChange
+  );
+
+  return () => {
+    cancelled = true;
+
+    window.removeEventListener(
+      "workspace-changed",
+      onWorkspaceChange
+    );
+  };
+}, [orgId, orgReady]);
+
+
+// ── holiday navigation ───────────────────────────────────────────────
+const previousHoliday = () => {
+  if (holidays.length === 0) return;
+
+  setHolidayIndex((current) =>
+    current === 0 ? holidays.length - 1 : current - 1
+  );
+};
+
+const nextHoliday = () => {
+  if (holidays.length === 0) return;
+
+  setHolidayIndex((current) =>
+    current === holidays.length - 1 ? 0 : current + 1
+  );
+};
+
   // ── render ────────────────────────────────────────────────────────────
   return (
    <div className="h-screen overflow-hidden bg-[#F6F9FC] dark:bg-slate-950">
@@ -374,7 +679,7 @@ const [workloadSummary, setWorkloadSummary] = useState({
           <main className="flex-1 ml-0 lg:ml-72 mt-18 h-[calc(100vh-72px)] min-h-0 overflow-y-auto overscroll-contain bg-[#F6F9FC] text-slate-900 px-4 py-5 sm:px-8 sm:py-8 dark:bg-slate-950 dark:text-slate-100">
 
             {/* ── ROW 1: STATS ── */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-6 mb-8">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-6 mb-8">
 
               <div className="dashboard-card min-h-[110px]">
                 <div className="flex justify-between items-center">
@@ -422,6 +727,81 @@ const [workloadSummary, setWorkloadSummary] = useState({
                   <div className="w-14 h-14 rounded-2xl bg-green-100 flex items-center justify-center dark:bg-green-500/10">
     <CheckCircle2 className="text-green-600 dark:text-green-400" size={28} />
 </div>
+                </div>
+              </div>
+
+              {/* Holidays */}
+              <div className="dashboard-card min-h-[110px]">
+                <div className="flex h-full flex-col justify-between">
+                  {/* Header */}
+                  <div className="flex items-start justify-between gap-2">
+                    <p className="text-sm font-medium text-slate-500 dark:text-slate-400">
+                      Holidays
+                    </p>
+
+                    {holidays.length > 1 && (
+                      <div className="flex items-center gap-1 shrink-0">
+                        <button
+                          type="button"
+                          onClick={previousHoliday}
+                          aria-label="Previous holiday"
+                          className="flex h-7 w-7 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-500 transition hover:bg-slate-100 hover:text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-400 dark:hover:bg-slate-700 dark:hover:text-white"
+                        >
+                          <span className="text-lg leading-none">‹</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={nextHoliday}
+                          aria-label="Next holiday"
+                          className="flex h-7 w-7 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-500 transition hover:bg-slate-100 hover:text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-400 dark:hover:bg-slate-700 dark:hover:text-white"
+                        >
+                          <span className="text-lg leading-none">›</span>
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Holiday Content */}
+                  {holidaysLoading ? (
+                    <div className="mt-2">
+                      <p className="text-sm text-slate-400 dark:text-slate-500">
+                        Loading...
+                      </p>
+                    </div>
+                  ) : holidays.length === 0 ? (
+                    <div className="mt-2">
+                      <h2 className="text-xl font-bold text-slate-900 dark:text-slate-100">
+                        No Holidays
+                      </h2>
+                      <p className="mt-1 text-xs text-slate-400 dark:text-slate-500">
+                        No holidays added for this year
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="mt-2 min-w-0">
+                      <h2
+                        className="truncate text-xl font-bold text-slate-900 dark:text-slate-100"
+                        title={holidays[holidayIndex]?.name}
+                      >
+                        {holidays[holidayIndex]?.name}
+                      </h2>
+
+                      <p className="mt-1 text-sm font-medium text-slate-500 dark:text-slate-400">
+                        {new Date(
+                          holidays[holidayIndex].date
+                        ).toLocaleDateString("en-GB", {
+                          day: "numeric",
+                          month: "short",
+                          year: "numeric",
+                        })}
+                      </p>
+
+                      <p className="mt-1 text-xs text-slate-400 dark:text-slate-500">
+                        {holidayIndex + 1} of {holidays.length}
+                      </p>
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -616,7 +996,7 @@ const [workloadSummary, setWorkloadSummary] = useState({
         <div className="col-span-3 text-center">
 
   <p className="font-semibold text-slate-900 dark:text-white">
-    {member.totalHours}h
+    {member.allocatedHours ?? member.totalHours}h
   </p>
 
   <p className="text-xs text-slate-500 dark:text-slate-400">
@@ -743,23 +1123,49 @@ const [workloadSummary, setWorkloadSummary] = useState({
                         const key        = calToKey(calYear, calMonth, day);
                         const isToday    = key === calTodayKey;
                         const isSelected = key === calSelectedDate;
-                        const dayEvents  = calEventMap[key] || [];
-                        const hasEvents  = dayEvents.length > 0;
+                        const dayEvents = calEventMap[key] || [];
+                        const dayHolidays = calHolidayMap[key] || [];
+                        const hasEvents = dayEvents.length > 0;
+                        const hasHoliday = dayHolidays.length > 0;
                         return (
                           <div
                             key={i}
                             onClick={() => setCalSelectedDate(isSelected ? null : key)}
                             className="relative flex flex-col items-center justify-center cursor-pointer group"
                           >
-                            <div className={`w-8 h-8 flex items-center justify-center rounded-full font-semibold text-xs transition-all ${
-                              isSelected
-                                ? "bg-cyan-500 text-white"
-                                : isToday
-                                ? "bg-purple-600 text-white"
-                                : "text-slate-600 group-hover:bg-slate-100 dark:text-slate-300 dark:group-hover:bg-slate-800"
-                            }`}>
-                              {day}
-                            </div>
+                            <div
+  className={`w-8 h-8 flex items-center justify-center rounded-full font-semibold text-xs transition-all ${
+    isSelected
+      ? "bg-cyan-500 text-white"
+      : isToday
+      ? "bg-purple-600 text-white"
+      : hasHoliday
+      ? "bg-orange-50 text-orange-700 dark:bg-orange-500/10 dark:text-orange-400"
+      : "text-slate-600 group-hover:bg-slate-100 dark:text-slate-300 dark:group-hover:bg-slate-800"
+  }`}
+>
+  {day}
+</div>
+
+{(hasEvents || hasHoliday) && (
+  <div className="flex items-center gap-0.5 mt-0.5">
+    {hasHoliday && (
+      <span
+        className="w-1.5 h-1.5 rounded-full bg-orange-500"
+        title={dayHolidays.map((h) => h.name).join(", ")}
+      />
+    )}
+
+    {dayEvents.slice(0, 2).map((e, idx) => (
+      <span
+        key={idx}
+        className={`w-1 h-1 rounded-full ${calTypeDot(e.type)}`}
+      />
+    ))}
+  </div>
+)}
+
+
                             {hasEvents && (
                               <div className="flex gap-0.5 mt-0.5">
                                 {dayEvents.slice(0, 3).map((e, idx) => (
@@ -815,64 +1221,273 @@ const [workloadSummary, setWorkloadSummary] = useState({
                             ✕
                           </button>
                         </div>
-                        {calSelectedEvents.length === 0 ? (
-                          <p className="text-slate-400 text-xs dark:text-slate-500">No events on this day.</p>
-                        ) : (
-                          <div className="space-y-2 max-h-40 overflow-y-auto pr-1">
-                            {calSelectedEvents.map((e) => (
+                        {calSelectedHolidays.length === 0 &&
+calSelectedEvents.length === 0 ? (
+  <p className="text-slate-400 text-xs dark:text-slate-500">
+    No events or holidays on this day.
+  </p>
+) : (
+  <div className="space-y-2 max-h-40 overflow-y-auto pr-1">
+
+    {/* Organization Holidays */}
+    {calSelectedHolidays.map((holiday) => (
+      <div
+        key={`holiday-${holiday._id}`}
+        className="flex items-start gap-2 rounded-lg border border-orange-200 bg-orange-50 p-2 dark:border-orange-500/20 dark:bg-orange-500/10"
+      >
+        <span className="w-2 h-2 rounded-full bg-orange-500 mt-1 shrink-0" />
+
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-bold text-orange-700 dark:text-orange-400">
+            {holiday.name}
+          </p>
+
+          <div className="flex items-center gap-2 mt-0.5">
+            <span className="text-[10px] text-orange-600 dark:text-orange-400">
+              Organization Holiday
+            </span>
+
+            {holiday.source && (
+              <span className="text-[10px] capitalize px-1.5 py-0.5 rounded-full bg-orange-100 text-orange-700 dark:bg-orange-500/10 dark:text-orange-400">
+                {holiday.source === "calendarific"
+                  ? "Public Holiday"
+                  : "Custom"}
+              </span>
+            )}
+          </div>
+
+          {holiday.description && (
+            <p className="text-[10px] text-slate-500 mt-1 dark:text-slate-400">
+              {holiday.description}
+            </p>
+          )}
+        </div>
+      </div>
+    ))}
+
+    {/* Normal Calendar Events */}
+    {calSelectedEvents.map((e) => (
+      <div
+        key={e._id}
+        className={`flex items-start gap-2 p-2 rounded-lg ${
+          e.type === "task"
+            ? "bg-blue-50 border border-blue-200 dark:bg-blue-500/10 dark:border-blue-500/20"
+            : e.type === "meeting"
+            ? "bg-green-50 border border-green-200 dark:bg-green-500/10 dark:border-green-500/20"
+            : e.type === "reminder"
+            ? "bg-red-50 border border-red-200 dark:bg-red-500/10 dark:border-red-500/20"
+            : "bg-orange-50 border border-orange-200 dark:bg-orange-500/10 dark:border-orange-500/20"
+        }`}
+      >
+        <span
+          className={`w-2 h-2 rounded-full mt-1 shrink-0 ${calTypeDot(e.type)}`}
+        />
+
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-bold text-slate-900 truncate dark:text-slate-100">
+            {e.title}
+          </p>
+
+          <div className="flex items-center gap-2 mt-0.5">
+            <span className="text-slate-500 text-[10px] dark:text-slate-400">
+              {e.time}
+            </span>
+
+            <span
+              className={`text-[10px] capitalize px-1.5 py-0.5 rounded-full ${
+                e.type === "task"
+                  ? "bg-blue-100 text-blue-700 dark:bg-blue-500/10 dark:text-blue-400"
+                  : e.type === "meeting"
+                  ? "bg-green-100 text-green-700 dark:bg-green-500/10 dark:text-green-400"
+                  : e.type === "reminder"
+                  ? "bg-red-100 text-red-700 dark:bg-red-500/10 dark:text-red-400"
+                  : "bg-orange-100 text-orange-700 dark:bg-orange-500/10 dark:text-orange-400"
+              }`}
+            >
+              {e.type}
+            </span>
+          </div>
+
+          {e.assignees.length > 0 && (
+            <p className="text-[10px] text-slate-400 mt-0.5 truncate dark:text-slate-500">
+              {e.assignees
+                .map(
+                  (a: { username: string }) =>
+                    a.username
+                )
+                .join(", ")}
+            </p>
+          )}
+        </div>
+      </div>
+    ))}
+  </div>
+)}
+
+                                                </div>
+                    )}
+
+                  </div>
+                </div>
+
+                {/* ── LOWER CALENDAR INFORMATION ──────────────────────────── */}
+                <div className="mt-6 pt-5 border-t border-slate-200 dark:border-slate-800">
+
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+
+                    {/* LEFT COLUMN: Today's Events + Today's Holidays */}
+                    <div className="min-w-0">
+
+                      <h3 className="text-xl font-bold text-slate-800 dark:text-slate-100 mb-3">
+                        Today's Events
+                      </h3>
+
+                      {calTodayEvents.length === 0 ? (
+                        <p className="text-slate-400 text-sm dark:text-slate-500">
+                          No events today.
+                        </p>
+                      ) : (
+                        <div className="max-h-56 overflow-y-auto pr-2 space-y-4">
+                          {calTodayEvents.map((e) => (
+                            <div key={e._id} className="flex items-center gap-3">
                               <div
-                                key={e._id}
-                                className={`flex items-start gap-2 p-2 rounded-lg ${
-                                  e.type === "task"      ? "bg-blue-50 border border-blue-200 dark:bg-blue-500/10 dark:border-blue-500/20" :
-                                  e.type === "meeting"   ? "bg-green-50 border border-green-200 dark:bg-green-500/10 dark:border-green-500/20" :
-                                  e.type === "reminder"  ? "bg-red-50 border border-red-200 dark:bg-red-500/10 dark:border-red-500/20" :
-                                                          "bg-orange-50 border border-orange-200 dark:bg-orange-500/10 dark:border-orange-500/20"
-                                }`}
+                                className={`w-3 h-3 rounded-full shrink-0 ${calTypeDot(e.type)}`}
+                              />
+                              <span className="text-slate-700 dark:text-slate-200">
+                                {e.time} - {e.title}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      {/* Today's Holidays — hidden when there is no holiday */}
+                      {calInfoHolidays.length > 0 && (
+                        <div className="mt-5 pt-4 border-t border-slate-200 dark:border-slate-800">
+
+                          <div className="flex items-center justify-between mb-3">
+                            <h4 className="text-sm font-bold text-orange-700 dark:text-orange-400">
+                              Today's Holidays
+                            </h4>
+
+                            <span className="text-[10px] px-2 py-1 rounded-full bg-orange-100 text-orange-700 dark:bg-orange-500/10 dark:text-orange-400">
+                              {calInfoHolidays.length}
+                            </span>
+                          </div>
+
+                          <div className="max-h-40 overflow-y-auto pr-2 space-y-2">
+                            {calInfoHolidays.map((holiday) => (
+                              <div
+                                key={`calendar-holiday-${holiday._id}`}
+                                className="flex items-start gap-3 rounded-xl border border-orange-200 bg-orange-50 p-3 dark:border-orange-500/20 dark:bg-orange-500/10"
                               >
-                                <span className={`w-2 h-2 rounded-full mt-1 shrink-0 ${calTypeDot(e.type)}`} />
+                                <span className="w-2.5 h-2.5 rounded-full bg-orange-500 mt-1 shrink-0" />
+
                                 <div className="min-w-0 flex-1">
-                                  <p className="text-sm font-bold text-slate-900 truncate dark:text-slate-100">{e.title}</p>
-                                  <div className="flex items-center gap-2 mt-0.5">
-                                    <span className="text-slate-500 text-[10px] dark:text-slate-400">{e.time}</span>
-                                    <span className={`text-[10px] capitalize px-1.5 py-0.5 rounded-full ${
-                                      e.type === "task"      ? "bg-blue-100 text-blue-700 dark:bg-blue-500/10 dark:text-blue-400" :
-                                      e.type === "meeting"   ? "bg-green-100 text-green-700 dark:bg-green-500/10 dark:text-green-400" :
-                                      e.type === "reminder"  ? "bg-red-100 text-red-700 dark:bg-red-500/10 dark:text-red-400" :
-                                                              "bg-orange-100 text-orange-700 dark:bg-orange-500/10 dark:text-orange-400"
-                                    }`}>{e.type}</span>
+                                  <p className="text-sm font-semibold text-orange-800 dark:text-orange-300">
+                                    {holiday.name}
+                                  </p>
+
+                                  <div className="flex flex-wrap items-center gap-2 mt-1">
+                                    <span className="text-[10px] text-orange-600 dark:text-orange-400">
+                                      Organization Holiday
+                                    </span>
+
+                                    {holiday.source && (
+                                      <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-orange-100 text-orange-700 dark:bg-orange-500/10 dark:text-orange-400">
+                                        {holiday.source === "calendarific"
+                                          ? "Public Holiday"
+                                          : "Custom"}
+                                      </span>
+                                    )}
                                   </div>
-                                  {e.assignees.length > 0 && (
-                                    <p className="text-[10px] text-slate-400 mt-0.5 truncate dark:text-slate-500">
-                                      {e.assignees.map((a: { username: string }) => a.username).join(", ")}
+
+                                  {holiday.description && (
+                                    <p className="text-[10px] text-slate-500 mt-1 dark:text-slate-400">
+                                      {holiday.description}
                                     </p>
                                   )}
                                 </div>
                               </div>
                             ))}
                           </div>
-                        )}
+
+                        </div>
+                      )}
+
+                    </div>
+
+                    {/* RIGHT COLUMN: On Leave */}
+                    <div className="min-w-0">
+
+                      <div className="flex items-center justify-between mb-3">
+                        <h3 className="text-xl font-bold text-slate-800 dark:text-slate-100">
+                          On Leave
+                        </h3>
+
+                        <span className="text-xs text-slate-400 dark:text-slate-500">
+                          {calSelectedDate
+                            ? new Date(
+                                calSelectedDate + "T12:00:00"
+                              ).toLocaleDateString("en-US", {
+                                month: "short",
+                                day: "numeric",
+                              })
+                            : "Today"}
+                        </span>
                       </div>
-                    )}
+
+                      {calendarOnLeaveLoading ? (
+                        <div className="flex items-center justify-center py-8">
+                          <div className="w-5 h-5 border-2 border-orange-500 border-t-transparent rounded-full animate-spin" />
+                        </div>
+                      ) : calendarOnLeave.length === 0 ? (
+                        <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50 px-4 py-6 text-center dark:border-slate-800 dark:bg-slate-900/50">
+                          <CalendarOff
+                            size={22}
+                            className="mx-auto mb-2 text-slate-400 dark:text-slate-500"
+                          />
+                          <p className="text-sm text-slate-400 dark:text-slate-500">
+                            No one is on leave
+                          </p>
+                          <p className="text-[10px] text-slate-400 mt-1 dark:text-slate-500">
+                            for this date
+                          </p>
+                        </div>
+                      ) : (
+                        <div className="max-h-64 overflow-y-auto pr-2 space-y-2.5">
+                          {calendarOnLeave.map((entry) => (
+                            <div
+                              key={`${entry.userId}-${entry.startDate}`}
+                              className="flex items-center gap-3 rounded-xl border border-slate-200 bg-slate-50 p-2.5 dark:border-slate-800 dark:bg-slate-900"
+                            >
+                              <UserAvatar
+                                name={entry.username}
+                                color={entry.avatarColor}
+                                seed={entry.userId}
+                                size={34}
+                              />
+
+                              <div className="min-w-0 flex-1">
+                                <p className="text-sm font-semibold text-slate-800 truncate dark:text-slate-100">
+                                  {entry.username || "Unknown User"}
+                                </p>
+
+                                <p className="text-[10px] text-orange-600 dark:text-orange-400">
+                                  {entry.leaveType}
+                                </p>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                    </div>
 
                   </div>
+
                 </div>
 
-                {/* Today's Events */}
-                <div className="mt-6 pt-4 border-t border-slate-200 dark:border-slate-800">
-                  <h3 className="text-xl font-bold text-slate-800 dark:text-slate-100">Today's Events</h3>
-                  {calTodayEvents.length === 0 ? (
-                    <p className="text-slate-400 text-sm dark:text-slate-500">No events today.</p>
-                  ) : (
-                    <div className="space-y-4">
-                      {calTodayEvents.map((e) => (
-                        <div key={e._id} className="flex items-center gap-3">
-                          <div className={`w-3 h-3 rounded-full ${calTypeDot(e.type)}`} />
-                          <span className="text-slate-700 dark:text-slate-200">{e.time} - {e.title}</span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
 
               </div>
             </div>

@@ -137,6 +137,29 @@ workingDayCount: {
   type: Number,
   default: 0,
 },
+    // Schedule links for Gantt planning. taskId is the predecessor.
+    // type: FS (finish-to-start, default), SS, FF, SF. lagDays can be negative (lead).
+    dependencies: {
+      type: [
+        {
+          taskId: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: "Task",
+            required: true,
+          },
+          type: {
+            type: String,
+            enum: ["FS", "SS", "FF", "SF"],
+            default: "FS",
+          },
+          lagDays: {
+            type: Number,
+            default: 0,
+          },
+        },
+      ],
+      default: [],
+    },
     tags: {
       type: [String],
       default: [],
@@ -251,6 +274,15 @@ workingDayCount: {
       type: Date,
       default: null,
     },
+    customFieldValues: {
+      type: [
+        {
+          fieldId: { type: String, required: true },
+          value: { type: mongoose.Schema.Types.Mixed, default: null },
+        },
+      ],
+      default: [],
+    },
   },
   { timestamps: true }
 );
@@ -262,6 +294,26 @@ taskSchema.index({ project: 1, dueDate: 1, status: 1, isDeleted: 1 });
 taskSchema.index({
     title: "text",
     description: "text",
+});
+
+function normalizePriorityValue(value) {
+  if (typeof value !== "string") return value;
+  const normalized = value.trim().toLowerCase();
+  return ["low", "medium", "high"].includes(normalized) ? normalized : value;
+}
+
+taskSchema.pre("validate", function normalizePriorityEnums() {
+  this.priority = normalizePriorityValue(this.priority);
+  const normalizeList = (list) => {
+    if (!Array.isArray(list)) return;
+    for (const subtask of list) {
+      if (subtask && typeof subtask.priority === "string") {
+        subtask.priority = normalizePriorityValue(subtask.priority);
+      }
+    }
+  };
+  normalizeList(this.subtasks);
+  normalizeList(this.deletedSubtasks);
 });
 
 taskSchema.pre("save", function syncPrimaryAssignee() {

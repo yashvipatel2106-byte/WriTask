@@ -2,6 +2,7 @@
 
 import { authFetch } from "@/lib/validation/authFetch";
 import { buildStatusLabels, buildStatusOptions, type CustomStatus } from "@/lib/taskStatuses";
+import type { CardPreviewConfig, ProjectCustomField } from "@/lib/kanbanCardPreview";
 import type { TaskItem } from "./KanbanBoard";
 import TaskDetailDialog from "./TaskDetailDialog";
 import { useMemo, useState } from "react";
@@ -16,6 +17,11 @@ type Props = {
   tasks: TaskItem[];
   canEdit: boolean;
   customStatuses?: CustomStatus[];
+  customFields?: ProjectCustomField[];
+  otherCustomFields?: ProjectCustomField[];
+  cardPreviewConfig?: CardPreviewConfig | null;
+  adoptedCustomFieldIds?: string[];
+  organizationId?: string | null;
   onTasksChange: (tasks: TaskItem[]) => void;
 };
 
@@ -46,6 +52,11 @@ export default function TableView({
   tasks,
   canEdit,
   customStatuses = [],
+  customFields = [],
+  otherCustomFields = [],
+  cardPreviewConfig = null,
+  adoptedCustomFieldIds = [],
+  organizationId = null,
   onTasksChange,
 }: Props) {
   const statusLabels = buildStatusLabels(customStatuses);
@@ -452,7 +463,13 @@ export default function TableView({
         <TaskDetailDialog
           task={selectedTask}
           projectId={projectId}
+          customFields={customFields}
+          otherCustomFields={otherCustomFields}
+          cardPreviewConfig={cardPreviewConfig}
+          adoptedCustomFieldIds={adoptedCustomFieldIds}
+          isPersonalProject={!organizationId}
           canEdit={canEdit}
+          organizationId={organizationId}
           statusOptions={statusOptions}
           onClose={() => setSelectedTask(null)}
           onUpdated={handleTaskUpdated}

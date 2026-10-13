@@ -194,6 +194,45 @@ exports.updateProfile = async (req, res) => {
   }
 };
 
+const COLOR_THEMES = new Set([
+  "white", "black", "blue", "purple", "emerald", "teal",
+  "orange", "red", "pink", "amber",
+]);
+
+const COLOR_THEME_ALIASES = {
+  coral: "red",
+  softRed: "red",
+  lavender: "purple",
+  mint: "emerald",
+  yellow: "amber",
+  navy: "blue",
+  azure: "teal",
+};
+
+function resolveColorTheme(value) {
+  if (COLOR_THEME_ALIASES[value]) return COLOR_THEME_ALIASES[value];
+  return COLOR_THEMES.has(value) ? value : null;
+}
+
+exports.updateAppearance = async (req, res) => {
+  try {
+    const colorTheme = resolveColorTheme(req.body.colorTheme);
+    if (!colorTheme) {
+      return res.status(400).json({ message: "Invalid colour theme" });
+    }
+
+    const user = await User.findByIdAndUpdate(
+      req.user._id,
+      { $set: { "settings.colorTheme": colorTheme } },
+      { new: true, runValidators: true }
+    ).select("settings.colorTheme");
+
+    return res.json({ colorTheme: user.settings.colorTheme });
+  } catch (error) {
+    return res.status(500).json({ message: error.message });
+  }
+};
+
 exports.deleteAccount = async (req, res) => {
   try {
     const userId = req.user._id;

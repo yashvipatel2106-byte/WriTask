@@ -7,8 +7,7 @@ import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { useLogout } from "@/hooks/useLogout";
 import SearchResultsList from "@/components/search/SearchResultsList";
 import { useSearchQuery } from "@/lib/useSearchQuery";
-import { Bell, Search, Sun, Moon, Menu } from "lucide-react";
-import { useTheme } from "@/components/context/themeContext";
+import { Bell, Search, Menu } from "lucide-react";
 import { useSidebar } from "@/components/context/sidebarContext";
 import { avatarColor } from "@/lib/avatarColor";
 import { useOrganization } from "@/components/context/organizationContext";
@@ -26,6 +25,9 @@ import {
 } from "@/lib/notifications";
 import UserAvatar from "@/components/ui/UserAvatar";
 import Logo from "@/components/ui/Logo";
+import OrgSwitcher from "@/components/navbar/OrgSwitcher";
+import StatusMenu from "@/components/navbar/StatusMenu";
+import { useOrgLogoSrc } from "@/hooks/useOrgLogo";
 
 export interface User {
   id: string;
@@ -35,23 +37,14 @@ export interface User {
   avatarColor?: string;
 }
 
-function ThemeToggle() {
-  const { theme, toggleTheme } = useTheme();
-  return (
-    <button
-      type="button"
-      onClick={toggleTheme}
-      aria-label={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
-      title={theme === "dark" ? "Light mode" : "Dark mode"}
-      className="h-10 w-10 rounded-full border border-slate-200 bg-white hover:bg-slate-50 transition-colors flex items-center justify-center text-slate-500 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700"
-    >
-      {theme === "dark" ? <Sun size={18} /> : <Moon size={18} />}
-    </button>
-  );
-}
-
 export default function Navbar() {
-  const { currentOrgId, loading: orgLoading, orgReady } = useOrganization();
+  const { currentOrg, currentOrgId, loading: orgLoading, orgReady } =
+    useOrganization();
+  const orgLogoSrc = useOrgLogoSrc(
+    currentOrg?.organizationId,
+    currentOrg?.hasLogo,
+    currentOrg?.logoUpdatedAt
+  );
   const { toggle: toggleSidebar } = useSidebar();
   const [search, setSearch] = useState("");
   const [showProfileMenu, setShowProfileMenu] = useState(false);
@@ -68,7 +61,11 @@ export default function Navbar() {
   const searchRef = useRef<HTMLDivElement>(null);
   const router = useRouter();
 
-  const { results, isReady } = useSearchQuery(search, 5, 120);
+  const searchScope = currentOrgId
+    ? { organizationId: currentOrgId }
+    : { personal: true };
+
+  const { results, isReady } = useSearchQuery(search, 5, 120, searchScope);
   const [user, setUser] = useState<User | null>(null);
 
 useEffect(() => {
@@ -113,10 +110,13 @@ useEffect(() => {
     loadNotifications();
     const interval = setInterval(loadNotifications, 60000);
     const onUpdated = () => loadNotifications();
+    const onWorkspaceChange = () => loadNotifications();
     window.addEventListener("notifications-updated", onUpdated);
+    window.addEventListener("workspace-changed", onWorkspaceChange);
     return () => {
       clearInterval(interval);
       window.removeEventListener("notifications-updated", onUpdated);
+      window.removeEventListener("workspace-changed", onWorkspaceChange);
     };
   }, [loadNotifications]);
 
@@ -126,6 +126,18 @@ useEffect(() => {
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
+      const target = event.target as HTMLElement;
+
+      // Select's open menu renders via a portal into document.body (so it
+      // can float above everything), which means it's not a DOM descendant
+      // of profileRef even when it belongs to a dropdown nested inside the
+      // profile menu (e.g. StatusMenu's duration pickers) — without this
+      // check, clicking an option in one of those menus looked like a
+      // click "outside" and closed the whole profile menu underneath it.
+      if (target.closest(".dropdown-pop")) {
+        return;
+      }
+
       if (
         profileRef.current &&
         !profileRef.current.contains(event.target as Node)
@@ -195,8 +207,8 @@ useEffect(() => {
   const showDropdown = showSearchDropdown && search.trim();
 
   return (
-<header className="fixed top-0 left-0 right-0 z-50 h-[72px] bg-white/90 backdrop-blur-xl border-b border-slate-200 flex items-center justify-between px-3 sm:px-6 gap-2 sm:gap-6 dark:bg-slate-900/90 dark:border-slate-800">
-      <div className="flex items-center gap-2 shrink-0">
+<header className="app-topbar fixed top-0 left-0 right-0 z-50 h-[72px] bg-white/90 backdrop-blur-xl border-b border-slate-200 flex items-center justify-between px-3 sm:px-6 gap-2 sm:gap-6 dark:bg-slate-900/90 dark:border-slate-800">
+      <div className="flex items-center gap-2 sm:gap-3 shrink-0">
         <button
           type="button"
           onClick={toggleSidebar}
@@ -205,13 +217,44 @@ useEffect(() => {
         >
           <Menu size={20} />
         </button>
-        <Link href="/dashboard" className="shrink-0">
-          <div className="flex items-center gap-2 md:gap-3 cursor-pointer">
-            <Logo className="w-10 h-10 md:w-20 md:h-20" />
-            <h1 className="hidden sm:block text-lg md:text-xl font-bold text-slate-900 tracking-tight dark:text-white">WriTask</h1>
+        {showTopbarSkeleton ? (
+          <div className="flex items-center gap-2" aria-hidden>
+            <div className="skeleton h-10 w-10 rounded-full" />
+            <div className="skeleton h-5 w-24 rounded hidden sm:block" />
+            <div className="skeleton h-8 w-8 rounded-full lg:hidden" />
           </div>
-        </Link>
+        ) : (
+          <div className="flex items-center gap-2 shrink-0">
+            <Link href="/dashboard" className="flex items-center gap-2 shrink-0">
+              {orgLogoSrc ? (
+                <img
+                  src={orgLogoSrc}
+                  alt={currentOrg?.name || "Organization"}
+                  className="h-10 w-auto max-w-[9rem] md:h-12 md:max-w-[11rem] object-contain"
+                />
+              ) : (
+                <>
+                  <Logo className="w-10 h-10 md:w-12 md:h-12" />
+                  <h1 className="hidden sm:block text-lg md:text-xl font-bold text-slate-900 tracking-tight dark:text-white">
+                    WriTask
+                  </h1>
+                </>
+              )}
+            </Link>
+            {/* Mobile: keep icon beside brand */}
+            <div className="lg:hidden">
+              <OrgSwitcher />
+            </div>
+          </div>
+        )}
       </div>
+
+      {/* Desktop: sit on the sidebar / content border (sidebar is w-72) */}
+      {!showTopbarSkeleton && (
+        <div className="hidden lg:block absolute left-[15rem] top-1/2 z-[60] -translate-y-1/2">
+          <OrgSwitcher />
+        </div>
+      )}
 
       <div className="relative w-full max-w-[420px] hidden md:block" ref={searchRef}>
         {showTopbarSkeleton ? (
@@ -224,6 +267,11 @@ useEffect(() => {
         />
         <input
           type="search"
+          name="global-search"
+          autoComplete="off"
+          data-1p-ignore
+          data-lpignore="true"
+          data-form-type="other"
           placeholder="Search projects, tasks, members..."
           value={search}
           onChange={(e) => {
@@ -283,9 +331,6 @@ useEffect(() => {
         >
           <Search size={18} />
         </Link>
-        <div className="shrink-0">
-          <ThemeToggle />
-        </div>
         <div className="relative shrink-0" ref={notificationRef}>
           <button
             type="button"
@@ -393,6 +438,8 @@ useEffect(() => {
               color={user?.avatarColor}
               seed={user?.id || user?.email || user?.username || "user"}
               size={36}
+              userId={user?.id}
+              showStatus
             />
 
            <div className="text-left hidden md:block">
@@ -402,7 +449,8 @@ useEffect(() => {
           </button>
 
           {showProfileMenu && (
-            <div className="fixed left-4 right-4 top-19 sm:absolute sm:left-auto sm:right-0 sm:top-auto sm:mt-3 sm:w-64 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-xl z-50 py-1.5 dark:border-slate-800 dark:bg-slate-900">
+            <div className="fixed left-4 right-4 top-19 sm:absolute sm:left-auto sm:right-0 sm:top-auto sm:mt-3 sm:w-72 max-h-[80vh] overflow-y-auto rounded-2xl border border-slate-200 bg-white shadow-xl z-50 py-1.5 dark:border-slate-800 dark:bg-slate-900">
+              <StatusMenu />
               <Link
                 href="/settings/account"
                 className="flex items-center gap-3 w-full px-4 py-2.5 text-sm text-slate-600 hover:bg-slate-50 hover:text-slate-900 transition-colors dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-white"

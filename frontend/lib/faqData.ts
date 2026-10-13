@@ -245,7 +245,7 @@ export const FAQ_CATEGORIES: FaqCategory[] = [
         icon: BarChart3,
         question: "What reports are available?",
         answer:
-          "WriTask provides reports for project progress, task completion, productivity, workload distribution, and overall team performance.",
+          "Open Reports to build custom tables from folders and projects in your current workspace. My Report still shows your personal weekly summary.",
       },
       {
         icon: Gauge,

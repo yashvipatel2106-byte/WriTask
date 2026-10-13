@@ -6,14 +6,34 @@ import KanbanBoard, { type CustomStatus, type TaskItem, type TaskTab } from "@/c
 import TableView from "@/components/projects/TableView";
 import ProjectInviteDialog from "@/components/projects/ProjectInviteDialog";
 import { authFetch } from "@/lib/validation/authFetch";
+import type { MilestoneItem } from "@/lib/milestones";
 import { buildTaskUrl } from "@/lib/taskUrls";
 import { hasPermission, type ProjectRole } from "@/lib/rbac";
+import {
+  createDefaultCardPreviewConfig,
+  fieldBelongsToProjectWorkspace,
+  normalizeCardPreviewConfig,
+  toggleCustomField,
+  type CardPreviewConfig,
+  type ProjectCustomField,
+} from "@/lib/kanbanCardPreview";
 import Link from "next/link";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { LayoutGrid, Table2, Upload, Users } from "lucide-react";
+import { LayoutGrid, Table2, Upload, Users, FolderPlus, GanttChart } from "lucide-react";
 import ImportTasksDialog from "@/components/tasks/ImportTasksDialog";
+import GanttView from "@/components/projects/GanttView";
 import { toast } from "@/components/ui/toast";
+import { useOrgPermission } from "@/hooks/useOrgPermissions";
+import { projectMatchesActiveWorkspace } from "@/lib/workspaceStorage";
+import type { ScheduleBaseline } from "@/lib/scheduleBaselines";
+import {
+  parseProjectViewParam,
+  readStoredProjectView,
+  writeStoredProjectView,
+  type ProjectViewMode,
+} from "@/lib/projectViewStorage";
+import { formatProjectDuration } from "@/lib/projectScheduleBudget";
 type Project = {
   _id: string;
   title: string;
@@ -21,9 +41,20 @@ type Project = {
   myRole?: string;
   myPermissions?: string[];
   organization?: { _id: string; name: string };
+  workspace?: string | { _id: string } | null;
   createdBy?: { _id: string; username?: string; name?: string; email?: string; avatarColor?: string };
   members?: Array<{ user: { _id: string; username: string; email: string }; role: string }>;
   customStatuses?: CustomStatus[];
+  cardPreviewConfig?: CardPreviewConfig;
+  customFieldDefinitions?: ProjectCustomField[];
+  otherWorkspaceCustomFields?: ProjectCustomField[];
+  projectWorkspaceId?: string | null;
+  adoptedCustomFieldIds?: string[];
+  startDate?: string | null;
+  dueDate?: string | null;
+  billing?: "billable" | "non_billable";
+  budget?: number | null;
+  budgetCurrency?: string;
 };
 
 export default function ProjectBoardPage() {
@@ -32,11 +63,30 @@ export default function ProjectBoardPage() {
   const openTaskId = searchParams.get("task");
   const openSubtaskId = searchParams.get("subtask");
   const openTaskTab = searchParams.get("tab") as TaskTab | null;
+  const viewParam = searchParams.get("view");
   const router = useRouter();
+  const { canCreateProject } = useOrgPermission();
   const [project, setProject] = useState<Project | null>(null);
   const [tasks, setTasks] = useState<TaskItem[]>([]);
+  const [milestones, setMilestones] = useState<MilestoneItem[]>([]);
+  const [baselines, setBaselines] = useState<ScheduleBaseline[]>([]);
   const [customStatuses, setCustomStatuses] = useState<CustomStatus[]>([]);
-  const [view, setView] = useState<"kanban" | "table">("kanban");
+  const [cardPreviewConfig, setCardPreviewConfig] = useState<CardPreviewConfig>(
+    createDefaultCardPreviewConfig()
+  );
+  const [customFields, setCustomFields] = useState<ProjectCustomField[]>([]);
+  const [otherCustomFields, setOtherCustomFields] = useState<ProjectCustomField[]>([]);
+  const [projectWorkspaceId, setProjectWorkspaceId] = useState<string | null>(null);
+  const [adoptedCustomFieldIds, setAdoptedCustomFieldIds] = useState<string[]>([]);
+  const isPersonalProject = !project?.organization;
+  const [view, setViewState] = useState<ProjectViewMode>("kanban");
+  const setView = useCallback(
+    (next: ProjectViewMode) => {
+      setViewState(next);
+      if (projectId) writeStoredProjectView(projectId, next);
+    },
+    [projectId]
+  );
   const [loading, setLoading] = useState(true);
   const [accessDenied, setAccessDenied] = useState(false);
   const [accessDeniedMessage, setAccessDeniedMessage] = useState(
@@ -52,6 +102,18 @@ export default function ProjectBoardPage() {
     tasksRef.current = tasks;
   }, [tasks]);
 
+  useEffect(() => {
+    if (!projectId) return;
+    const fromUrl = parseProjectViewParam(viewParam);
+    if (fromUrl) {
+      setViewState(fromUrl);
+      writeStoredProjectView(projectId, fromUrl);
+      return;
+    }
+    const stored = readStoredProjectView(projectId);
+    if (stored) setViewState(stored);
+  }, [projectId, viewParam]);
+
   const showAccessToastOnce = useCallback((msg: string) => {
     if (accessToastShownRef.current) return;
     accessToastShownRef.current = true;
@@ -64,11 +126,14 @@ export default function ProjectBoardPage() {
 
       const currentTask = searchParams.get("task");
       const currentSubtask = searchParams.get("subtask");
+      const viewQs =
+        view === "kanban" ? "" : `view=${encodeURIComponent(view)}`;
 
       if (!taskId) {
         if (!currentTask && !currentSubtask) return;
         resolvedUrlTaskRef.current = null;
-        router.replace(`/projects/${projectId}`, { scroll: false });
+        const base = `/projects/${projectId}`;
+        router.replace(viewQs ? `${base}?${viewQs}` : base, { scroll: false });
         return;
       }
 
@@ -77,11 +142,16 @@ export default function ProjectBoardPage() {
         return;
       }
 
-      router.replace(buildTaskUrl(projectId, taskId, nextSubtask), {
+      const taskUrl = buildTaskUrl(projectId, taskId, nextSubtask);
+      const withView =
+        viewQs && !taskUrl.includes("view=")
+          ? `${taskUrl}${taskUrl.includes("?") ? "&" : "?"}${viewQs}`
+          : taskUrl;
+      router.replace(withView, {
         scroll: false,
       });
     },
-    [projectId, router, searchParams]
+    [projectId, router, searchParams, view]
   );
 
   const resolveUrlTask = useCallback(
@@ -129,6 +199,7 @@ export default function ProjectBoardPage() {
     setUrlTaskError(null);
     setProject(null);
     setTasks([]);
+    setBaselines([]);
     setLoading(true);
 
     const load = async () => {
@@ -148,8 +219,14 @@ export default function ProjectBoardPage() {
 
       if (!res.ok) {
         setAccessDenied(true);
-        setAccessDeniedMessage("You do not have access to this task or project.");
-        showAccessToastOnce("You do not have access to this task or project.");
+        const err = await res.json().catch(() => ({} as { message?: string }));
+        const msg =
+          err.message ||
+          (res.status >= 500
+            ? "Could not load this project. Try refreshing the page."
+            : "You do not have access to this task or project.");
+        setAccessDeniedMessage(msg);
+        showAccessToastOnce(msg);
         setLoading(false);
         return;
       }
@@ -157,17 +234,58 @@ export default function ProjectBoardPage() {
       const data = await res.json();
       if (generation !== loadGenerationRef.current) return;
 
+      const projectWorkspace = data.workspace ?? data.projectWorkspaceId ?? null;
+      if (!projectMatchesActiveWorkspace(projectWorkspace)) {
+        router.replace("/projects");
+        return;
+      }
+
       setProject(data);
       setCustomStatuses(Array.isArray(data.customStatuses) ? data.customStatuses : []);
+      setCardPreviewConfig(normalizeCardPreviewConfig(data.cardPreviewConfig));
+      setCustomFields(
+        Array.isArray(data.customFieldDefinitions) ? data.customFieldDefinitions : []
+      );
+      setOtherCustomFields(
+        Array.isArray(data.otherWorkspaceCustomFields)
+          ? data.otherWorkspaceCustomFields
+          : []
+      );
+      setProjectWorkspaceId(data.projectWorkspaceId || null);
+      setAdoptedCustomFieldIds(
+        Array.isArray(data.adoptedCustomFieldIds)
+          ? data.adoptedCustomFieldIds.map(String)
+          : []
+      );
 
-      const tasksRes = await authFetch(`/projects/${projectId}/tasks`);
-      if (generation !== loadGenerationRef.current) return;
-      if (tasksRes.ok) setTasks(await tasksRes.json());
+      const [tasksRes, milestonesRes, baselinesRes] = await Promise.all([
+  authFetch(`/projects/${projectId}/tasks`),
+  authFetch(`/projects/${projectId}/milestones`),
+  authFetch(`/projects/${projectId}/baselines`),
+]);
+
+if (generation !== loadGenerationRef.current) return;
+
+if (tasksRes.ok) setTasks(await tasksRes.json());
+if (milestonesRes.ok) setMilestones(await milestonesRes.json());
+if (baselinesRes.ok) setBaselines(await baselinesRes.json());
       setLoading(false);
     };
 
     void load();
   }, [projectId, router, showAccessToastOnce]);
+
+  useEffect(() => {
+    const onWorkspaceChange = () => {
+      if (!project) return;
+      const projectWorkspace = project.workspace ?? projectWorkspaceId;
+      if (!projectMatchesActiveWorkspace(projectWorkspace)) {
+        router.replace("/projects");
+      }
+    };
+    window.addEventListener("workspace-changed", onWorkspaceChange);
+    return () => window.removeEventListener("workspace-changed", onWorkspaceChange);
+  }, [project, projectWorkspaceId, router]);
 
   const handleImportTasks = async (file: File) => {
     const formData = new FormData();
@@ -208,7 +326,30 @@ export default function ProjectBoardPage() {
     const data = await res.json();
     setProject(data);
     setCustomStatuses(Array.isArray(data.customStatuses) ? data.customStatuses : []);
+    setCardPreviewConfig(normalizeCardPreviewConfig(data.cardPreviewConfig));
+    setCustomFields(
+      Array.isArray(data.customFieldDefinitions) ? data.customFieldDefinitions : []
+    );
+    setOtherCustomFields(
+      Array.isArray(data.otherWorkspaceCustomFields)
+        ? data.otherWorkspaceCustomFields
+        : []
+    );
+    setProjectWorkspaceId(data.projectWorkspaceId || null);
+    setAdoptedCustomFieldIds(
+      Array.isArray(data.adoptedCustomFieldIds)
+        ? data.adoptedCustomFieldIds.map(String)
+        : []
+    );
   }, [projectId]);
+
+  // Picks up edits made from the sidebar's 3-dot menu (Edit Project) while
+  // this project's detail page is open, so Project Duration/Billing/Budget
+  // reflect the change immediately instead of needing a manual refresh.
+  useEffect(() => {
+    window.addEventListener("projects-updated", reloadProject);
+    return () => window.removeEventListener("projects-updated", reloadProject);
+  }, [reloadProject]);
 
   useEffect(() => {
     if (!openTaskId || loading || accessDenied || !project) return;
@@ -289,6 +430,17 @@ export default function ProjectBoardPage() {
             <p className="text-slate-500 text-sm mt-1 capitalize dark:text-slate-400">
               Created By : {project.createdBy?.username || project.createdBy?.name || "Unknown"} · {project.members?.length || 0} members
             </p>
+            {(() => {
+              const duration = formatProjectDuration(
+                project.startDate,
+                project.dueDate
+              );
+              return duration ? (
+                <p className="text-slate-500 text-sm mt-1 dark:text-slate-400">
+                  Project Duration: {duration}
+                </p>
+              ) : null;
+            })()}
           </div>
           <div className="flex flex-wrap items-center gap-3">
             <div className="flex bg-white rounded-xl border border-slate-200 shadow-sm p-1 dark:bg-slate-900 dark:border-slate-800">
@@ -308,7 +460,23 @@ export default function ProjectBoardPage() {
               >
                 <Table2 size={16} /> Table
               </button>
+              <button
+                onClick={() => setView("gantt")}
+                className={`flex items-center gap-2 px-3 py-2 rounded-lg text-sm ${
+                  view === "gantt" ? "bg-cyan-50 text-cyan-700 dark:bg-cyan-400/10 dark:text-cyan-400" : "text-slate-500 dark:text-slate-400"
+                }`}
+              >
+                <GanttChart size={16} /> Gantt
+              </button>
             </div>
+            {canCreateProject && (
+              <Link
+                href={`/projects/create?parentProjectId=${projectId}`}
+                className="flex items-center gap-2 px-4 py-2 rounded-xl border border-slate-200 bg-white text-slate-700 text-sm hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+              >
+                <FolderPlus size={16} /> Subproject
+              </Link>
+            )}
             {canInvite && (
               <ProjectInviteDialog
                 projectId={projectId}
@@ -342,29 +510,92 @@ export default function ProjectBoardPage() {
 
         {view === "kanban" ? (
           <KanbanBoard
-            projectId={projectId}
-            tasks={tasks}
-            canEdit={canEditTasks}
-            canCreate={canCreateTasks}
-            customStatuses={customStatuses}
-            canAddStatus={canAddStatus}
-            canDeleteStatus={canDeleteStatus}
-            onCustomStatusesChange={setCustomStatuses}
-            initialTaskId={openTaskId}
-            initialSubtaskId={openSubtaskId}
-            initialTaskTab={openTaskTab}
-            onTaskUrlChange={syncTaskUrl}
-            onTasksChange={setTasks}
-          />
-        ) : (
+  projectId={projectId}
+  tasks={tasks}
+  canEdit={canEditTasks}
+  canCreate={canCreateTasks}
+  customStatuses={customStatuses}
+  canAddStatus={canAddStatus}
+  canDeleteStatus={canDeleteStatus}
+  onCustomStatusesChange={setCustomStatuses}
+  cardPreviewConfig={cardPreviewConfig}
+  customFields={customFields}
+  otherCustomFields={otherCustomFields}
+  projectWorkspaceId={projectWorkspaceId}
+  organizationId={project.organization?._id || null}
+  adoptedCustomFieldIds={adoptedCustomFieldIds}
+  onCustomFieldCreated={(field) => {
+    const belongsToCurrent = fieldBelongsToProjectWorkspace(
+      field,
+      projectWorkspaceId,
+      isPersonalProject
+    );
+    if (belongsToCurrent) {
+      setCustomFields((current) => {
+        if (current.some((existing) => existing.id === field.id)) {
+          return current.map((row) => (row.id === field.id ? field : row));
+        }
+        return [...current, field];
+      });
+    } else {
+      setOtherCustomFields((current) => {
+        if (current.some((existing) => existing.id === field.id)) {
+          return current.map((row) => (row.id === field.id ? field : row));
+        }
+        return [...current, field];
+      });
+    }
+    setAdoptedCustomFieldIds((current) =>
+      current.includes(field.id) ? current : [...current, field.id]
+    );
+    setCardPreviewConfig((current) =>
+      toggleCustomField(normalizeCardPreviewConfig(current), field.id, true)
+    );
+    void reloadProject();
+  }}
+  onCardPreviewConfigChange={setCardPreviewConfig}
+  initialTaskId={openTaskId}
+  initialSubtaskId={openSubtaskId}
+  initialTaskTab={openTaskTab}
+  onTaskUrlChange={syncTaskUrl}
+  onTasksChange={setTasks}
+/>
+        ) : view === "table" ? (
           <TableView
             projectId={projectId}
             tasks={tasks}
             canEdit={canEditTasks}
             customStatuses={customStatuses}
+            customFields={customFields}
+            otherCustomFields={otherCustomFields}
+            cardPreviewConfig={cardPreviewConfig}
+            adoptedCustomFieldIds={adoptedCustomFieldIds}
+            organizationId={project.organization?._id || null}
             onTasksChange={setTasks}
           />
+        ) : (
+          <GanttView
+            projectId={projectId}
+            tasks={tasks}
+            canEdit={canEditTasks}
+             projectPermissions={project.myPermissions ?? []}
+            customStatuses={customStatuses}
+            customFields={customFields}
+            otherCustomFields={otherCustomFields}
+            cardPreviewConfig={cardPreviewConfig}
+            adoptedCustomFieldIds={adoptedCustomFieldIds}
+            organizationId={project.organization?._id || null}
+            onTasksChange={setTasks}
+            milestones={milestones}
+            onMilestonesChange={setMilestones}
+            baselines={baselines}
+onBaselinesChange={setBaselines}
+            initialTaskId={openTaskId}
+            initialSubtaskId={openSubtaskId}
+            onTaskUrlChange={syncTaskUrl}
+          />
         )}
+        
         <ImportTasksDialog
           open={showImportDialog}
           onClose={() => setShowImportDialog(false)}

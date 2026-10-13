@@ -49,7 +49,11 @@ export default function ResetPasswordPage() {
         return;
       }
 
-      setMessage("Password reset successfully. Redirecting to sign in…");
+      setMessage(
+        data.message
+          ? `${data.message}. Redirecting to sign in…`
+          : "Password reset successfully. Redirecting to sign in…"
+      );
       setTimeout(() => router.push("/login"), 1800);
     } catch {
       setError("Unable to reset your password. Please try again.");
@@ -69,7 +73,7 @@ export default function ResetPasswordPage() {
               <LockHeaderIcon />
             </div>
             <h1>Reset password</h1>
-            <p>Choose a new password for your account</p>
+            <p>Choose a new password for the organization linked to this reset email.</p>
             <div className="rule" />
           </div>
 

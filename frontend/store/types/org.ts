@@ -4,9 +4,13 @@ export type OrgSummary = {
   organizationId: string;
   name: string;
   slug: string;
+  description?: string;
   role: OrgRole | string;
+  hasLogo?: boolean;
+  logoUpdatedAt?: string | null;
   orgPermissions?: string[];
   projectPermissions?: string[];
+  hoursPerDay?: number;
 };
 
 export type OrgAccessData = {

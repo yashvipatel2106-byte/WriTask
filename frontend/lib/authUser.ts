@@ -1,6 +1,7 @@
 import type { StoredUser } from "@/lib/validation/authStorage";
 import { getStoredUser, setStoredUser } from "@/lib/validation/authStorage";
-import { writeStoredOrgId } from "@/lib/orgStorage";
+import { writeStoredOrgId, clearStoredProjectId } from "@/lib/orgStorage";
+import { clearStoredWorkspaceId } from "@/lib/workspaceStorage";
 import type { UserProfile } from "@/store/types/auth";
 
 export function normalizeUserProfile(data: Record<string, unknown>): UserProfile {
@@ -16,6 +17,9 @@ export function normalizeUserProfile(data: Record<string, unknown>): UserProfile
     bio: data.bio ? String(data.bio) : "",
     avatarColor: data.avatarColor ? String(data.avatarColor) : "",
     systemRole: data.systemRole ? String(data.systemRole) : undefined,
+    colorTheme: typeof data.colorTheme === "string"
+      ? data.colorTheme
+      : (data.settings as { colorTheme?: string } | undefined)?.colorTheme ?? null,
     profileMeta: data.profileMeta as UserProfile["profileMeta"],
   };
 }
@@ -27,6 +31,7 @@ export function profileToStoredUser(user: UserProfile): StoredUser {
     email: user.email,
     systemRole: user.systemRole,
     avatarColor: user.avatarColor,
+    colorTheme: user.colorTheme ?? null,
   };
 }
 
@@ -39,6 +44,7 @@ export function storedUserToProfile(stored: StoredUser | null): UserProfile | nu
     email: stored.email || "",
     systemRole: stored.systemRole,
     avatarColor: stored.avatarColor || "",
+    colorTheme: stored.colorTheme ?? null,
   };
 }
 
@@ -58,14 +64,14 @@ type LoginSuccessData = {
   user: Record<string, unknown>;
   organizationId?: string | null;
   needsOnboarding?: boolean;
+  next?: string | null;
 };
 
 /**
  * Shared "finish signing the user in" step for every auth entry point
- * (password login, Google Sign-In, ...): persist the session, then send
- * them wherever they were actually headed — a pending org/project
- * invitation if one exists, otherwise dashboard.
- * Starter wizard is only entered from the home "Get started" CTA.
+ * (password login, Google Sign-In, ...): persist the session, open the
+ * organization returned by the server when present, otherwise Personal
+ * Workspace, then redirect.
  */
 export function completeLoginRedirect(data: LoginSuccessData) {
   localStorage.setItem("token", data.token);
@@ -84,18 +90,23 @@ export function completeLoginRedirect(data: LoginSuccessData) {
     /* ignore */
   }
 
-  if (data.organizationId) {
-    writeStoredOrgId(data.organizationId);
-  } else {
-    localStorage.removeItem("organizationId");
+  const orgId = data.organizationId || null;
+  writeStoredOrgId(orgId);
+  clearStoredProjectId();
+  if (orgId) {
+    clearStoredWorkspaceId();
   }
 
   const pendingInvite = localStorage.getItem("pendingInviteToken");
   const pendingProjectInvite = localStorage.getItem("pendingProjectInviteToken");
+  const safeNext =
+    data.next && data.next.startsWith("/") && !data.next.startsWith("//")
+      ? data.next
+      : null;
 
   window.location.href = pendingProjectInvite
     ? `/invitations/project?token=${pendingProjectInvite}`
     : pendingInvite
       ? `/invitations/accept?token=${pendingInvite}`
-      : "/dashboard";
+      : safeNext || "/dashboard";
 }

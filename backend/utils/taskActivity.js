@@ -105,6 +105,13 @@ async function buildTaskUpdateEntries(task, updates, actorId) {
         action: "description_changed",
         message: "updated the description",
         field: "description",
+        // Kept out of oldValue/newValue (rendered inline as plain text
+        // elsewhere) since these are full HTML strings; the diff popup
+        // reads them from meta instead.
+        meta: {
+          previousDescription: task.description || "",
+          newDescription: updates.description || "",
+        },
       })
     );
   }
@@ -252,6 +259,38 @@ async function buildTaskUpdateEntries(task, updates, actorId) {
         field: "workingDays",
       })
     );
+  }
+
+  if (updates.dependencies !== undefined) {
+    const summarize = (deps) => {
+      if (!Array.isArray(deps) || deps.length === 0) return "none";
+      return deps
+        .map((d) => {
+          const id =
+            d?.taskId && typeof d.taskId === "object" && d.taskId._id
+              ? String(d.taskId._id)
+              : String(d?.taskId || "");
+          const type = d?.type || "FS";
+          const lag = Number(d?.lagDays) || 0;
+          const lagPart = lag === 0 ? "" : lag > 0 ? `+${lag}d` : `${lag}d`;
+          return `${type}${lagPart}:${id.slice(-6) || "?"}`;
+        })
+        .sort()
+        .join(", ");
+    };
+    const oldSummary = summarize(task.dependencies);
+    const newSummary = summarize(updates.dependencies);
+    if (!valuesEqual(oldSummary, newSummary)) {
+      entries.push(
+        buildEntry(actorId, {
+          action: "dependencies_changed",
+          message: `updated dependencies from ${oldSummary} to ${newSummary}`,
+          field: "dependencies",
+          oldValue: oldSummary,
+          newValue: newSummary,
+        })
+      );
+    }
   }
 
   return entries;

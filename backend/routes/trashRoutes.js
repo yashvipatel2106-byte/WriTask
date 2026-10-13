@@ -7,15 +7,19 @@ const {
   restoreTask,
   restoreOrganization,
   restoreSubtask,
+  restoreFolder,
   permanentlyDeleteProject,
   permanentlyDeleteTask,
   permanentlyDeleteOrganization,
   permanentlyDeleteSubtask,
+  permanentlyDeleteFolder,
 } = require("../controllers/trashController");
 
 router.use(authMiddleware);
 
 router.get("/", getTrash);
+router.patch("/folders/:folderId/restore", restoreFolder);
+router.delete("/folders/:folderId", permanentlyDeleteFolder);
 router.patch("/projects/:projectId/restore", restoreProject);
 router.patch("/tasks/:taskId/restore", restoreTask);
 router.patch("/organizations/:organizationId/restore", restoreOrganization);

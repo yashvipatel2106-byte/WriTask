@@ -10,6 +10,7 @@ const auth =
 const {
     getProfile,
     updateProfile,
+    updateAppearance,
     deleteAccount,
 }
     =
@@ -27,6 +28,12 @@ router.put(
     "/",
     auth,
     updateProfile
+);
+
+router.patch(
+    "/appearance",
+    auth,
+    updateAppearance
 );
 
 router.delete(

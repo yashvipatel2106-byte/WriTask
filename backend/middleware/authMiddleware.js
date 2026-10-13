@@ -27,6 +27,7 @@ const auth = async (req, res, next) => {
     }
 
     req.user = user;
+    req.activeOrganizationId = decoded.organizationId || null;
 
     next();
   } catch (error) {

@@ -1,16 +1,33 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Check, ChevronDown } from "lucide-react";
 
 export type SelectOption = { value: string; label: string };
+
+/** Matches `.field-input` sizing for form contexts. */
+export function fieldSelectTriggerClass(open: boolean, extra = ""): string {
+  return `flex items-center justify-between gap-2 w-full h-10 px-3.5 rounded-[14px] border bg-white text-sm text-slate-900 outline-none transition-all cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed dark:bg-slate-800 dark:text-slate-100 ${
+    open
+      ? "border-cyan-500 ring-4 ring-cyan-100 dark:border-cyan-500 dark:ring-cyan-500/20"
+      : "border-slate-200 hover:border-slate-300 dark:border-slate-700 dark:hover:border-slate-600"
+  } ${extra}`.trim();
+}
 
 type SelectProps = {
   value: string;
   onChange: (value: string) => void;
   options: SelectOption[];
   disabled?: boolean;
+  /** Shown when value is empty and no matching option exists. */
+  placeholder?: string;
+  /** Open the menu immediately on mount (inline edit flows). */
+  autoOpen?: boolean;
+  /** Called whenever the open state changes (e.g. to exit inline edit on close). */
+  onOpenChange?: (open: boolean) => void;
+  /** Size the floating menu to the trigger width. Defaults to true. */
+  matchTriggerWidth?: boolean;
   /** Extra classes on the outer (relative, inline-flex) wrapper. */
   className?: string;
   /**
@@ -24,6 +41,10 @@ type SelectProps = {
   menuClassName?: string;
   /** Anchor the menu to the trigger's left or right edge. */
   align?: "left" | "right";
+  /** Accessible name when there is no visible label on the trigger. */
+  ariaLabel?: string;
+  /** z-index for the portaled menu — must exceed modal overlays (default z-[130]). */
+  menuZIndexClassName?: string;
 };
 
 const DEFAULT_TRIGGER =
@@ -42,29 +63,71 @@ export default function Select({
   onChange,
   options,
   disabled = false,
+  placeholder,
+  autoOpen = false,
+  onOpenChange,
+  matchTriggerWidth = true,
   className = "",
   triggerClassName,
-  menuClassName = "min-w-[160px]",
+  menuClassName = "",
   align = "left",
+  ariaLabel,
+  menuZIndexClassName = "z-[130]",
 }: SelectProps) {
   const [open, setOpen] = useState(false);
-  const [coords, setCoords] = useState({ top: 0, left: 0 });
+  const [coords, setCoords] = useState({
+    top: 0,
+    left: 0,
+    width: 0,
+    maxHeight: 280,
+  });
   const rootRef = useRef<HTMLDivElement>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
 
+  const setOpenState = (next: boolean) => {
+    setOpen(next);
+    onOpenChange?.(next);
+  };
+
   useEffect(() => {
+    if (autoOpen && !disabled) {
+      setOpenState(true);
+    }
+    // Only run on mount for inline-edit auto-open.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useLayoutEffect(() => {
     if (!open) return;
 
     const updatePosition = () => {
       const rect = buttonRef.current?.getBoundingClientRect();
       if (!rect) return;
-      setCoords({
-        top: rect.bottom + 8,
-        left: align === "right" ? rect.right : rect.left,
-      });
+      const gap = 6;
+      const pad = 8;
+      const measured = menuRef.current?.offsetHeight || options.length * 44 + 16;
+      const spaceBelow = window.innerHeight - rect.bottom - gap - pad;
+      const spaceAbove = rect.top - gap - pad;
+      const openUp =
+        spaceBelow < Math.min(measured, 240) && spaceAbove > spaceBelow;
+      const available = Math.max(120, openUp ? spaceAbove : spaceBelow);
+      const maxHeight = Math.min(280, available);
+      const width = Math.max(
+        matchTriggerWidth ? rect.width : 160,
+        rect.width,
+        180
+      );
+      let left = align === "right" ? rect.right - width : rect.left;
+      left = Math.min(Math.max(pad, left), window.innerWidth - width - pad);
+      const top = openUp
+        ? Math.max(pad, rect.top - Math.min(measured, maxHeight) - gap)
+        : rect.bottom + gap;
+      setCoords({ top, left, width, maxHeight });
     };
+
     updatePosition();
+    const frame = requestAnimationFrame(updatePosition);
 
     const handleClickOutside = (e: MouseEvent) => {
       const target = e.target as Node;
@@ -72,18 +135,13 @@ export default function Select({
         !rootRef.current?.contains(target) &&
         !menuRef.current?.contains(target)
       ) {
-        setOpen(false);
+        setOpenState(false);
       }
     };
-    // The menu is positioned from the trigger's on-screen coordinates, which
-    // go stale the moment any ancestor scrolls — close it instead of leaving
-    // it floating in the wrong place, matching native <select> behavior.
-    // Scroll events don't bubble but do have a capture phase, so scrolling
-    // inside the menu's own overflow-y-auto list also reaches this window
-    // listener — ignore those or the menu would close every time it's scrolled.
+
     const handleScroll = (e: Event) => {
       if (menuRef.current?.contains(e.target as Node)) return;
-      setOpen(false);
+      updatePosition();
     };
 
     document.addEventListener("mousedown", handleClickOutside);
@@ -91,21 +149,31 @@ export default function Select({
     window.addEventListener("scroll", handleScroll, true);
 
     return () => {
+      cancelAnimationFrame(frame);
       document.removeEventListener("mousedown", handleClickOutside);
       window.removeEventListener("resize", updatePosition);
       window.removeEventListener("scroll", handleScroll, true);
     };
-  }, [open, align]);
+  }, [open, align, options.length, matchTriggerWidth]);
 
   const selected = options.find((o) => o.value === value);
+  const displayLabel =
+    selected?.label ??
+    (placeholder && !value ? placeholder : value || placeholder || "");
+
+  const resolvedMenuClassName =
+    menuClassName || (matchTriggerWidth ? "" : "min-w-[160px]");
 
   return (
-    <div ref={rootRef} className={`relative inline-flex ${className}`}>
+    <div ref={rootRef} className={`relative inline-flex min-w-0 ${className}`}>
       <button
         ref={buttonRef}
         type="button"
         disabled={disabled}
-        onClick={() => setOpen((o) => !o)}
+        aria-label={ariaLabel}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        onClick={() => setOpenState(!open)}
         className={
           typeof triggerClassName === "function"
             ? triggerClassName(open)
@@ -117,7 +185,11 @@ export default function Select({
               } ${disabled ? "opacity-50 cursor-not-allowed" : ""}`
         }
       >
-        <span className="truncate">{selected?.label ?? value}</span>
+        <span
+          className={`truncate ${!selected && placeholder && !value ? "text-slate-400 dark:text-slate-500" : ""}`}
+        >
+          {displayLabel}
+        </span>
         <ChevronDown
           size={14}
           className={`shrink-0 text-slate-400 transition-transform duration-200 ${
@@ -132,21 +204,21 @@ export default function Select({
             ref={menuRef}
             style={{
               top: coords.top,
-              ...(align === "right"
-                ? { left: coords.left, transform: "translateX(-100%)" }
-                : { left: coords.left }),
+              left: coords.left,
+              width: coords.width || undefined,
+              maxHeight: coords.maxHeight,
             }}
-           className={`dropdown-pop fixed rounded-xl border border-slate-200 bg-white shadow-xl p-1.5 z-[100] dark:border-slate-700 dark:bg-slate-900 ${menuClassName}`}
+            className={`dropdown-pop fixed overflow-y-auto rounded-xl border border-slate-200 bg-white shadow-xl p-1.5 ${menuZIndexClassName} dark:border-slate-700 dark:bg-slate-900 ${resolvedMenuClassName}`}
           >
             {options.map((opt) => {
               const isSelected = opt.value === value;
               return (
                 <button
-                  key={opt.value}
+                  key={opt.value || "__empty__"}
                   type="button"
                   onClick={() => {
                     onChange(opt.value);
-                    setOpen(false);
+                    setOpenState(false);
                   }}
                   className={`w-full flex items-center justify-between gap-2 px-3 py-2.5 rounded-lg text-sm text-left whitespace-nowrap transition-colors ${
                     isSelected

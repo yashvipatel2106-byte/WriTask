@@ -5,14 +5,20 @@ import Navbar from "@/components/navbar/Navbar";
 import { useOrganization } from "@/components/context/organizationContext";
 import { authFetch } from "@/lib/validation/authFetch";
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useOrgPermission } from "@/hooks/useOrgPermissions";
+import { buildScopeQuery } from "@/lib/workspaceStorage";
 import { avatarColor } from "@/lib/avatarColor";
 import UserAvatar from "@/components/ui/UserAvatar";
-import { Search, FolderKanban } from "lucide-react";
+import { Search, FolderKanban, Folder, FileText } from "lucide-react";
 import { confirmDialog } from "@/components/ui/confirm";
 import { toast } from "@/components/ui/toast";
+import {
+  EMPTY_PROJECT_TREE,
+  type ProjectTree,
+  type TreeProject,
+} from "@/lib/projectTree";
 
 type Project = {
   _id: string;
@@ -24,14 +30,79 @@ type Project = {
   organization?: { name: string; slug: string };
 };
 
+function NestedProjectLinks({
+  nodes,
+  onOpen,
+}: {
+  nodes: TreeProject[];
+  onOpen: (id: string) => void;
+}) {
+  return (
+    <ul className="space-y-1">
+      {nodes.map((node) => (
+        <li key={node._id}>
+          <button
+            type="button"
+            onClick={() => onOpen(node._id)}
+            className="text-sm text-cyan-700 hover:text-cyan-800 dark:text-cyan-400 dark:hover:text-cyan-300"
+          >
+            {node.title}
+          </button>
+          {(node.children || []).length > 0 && (
+            <div className="ml-4 mt-1 border-l border-slate-200 pl-3 dark:border-slate-700">
+              <NestedProjectLinks nodes={node.children || []} onOpen={onOpen} />
+            </div>
+          )}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 export default function ProjectsPage() {
   const router = useRouter();
   const { currentOrg } = useOrganization();
   const { canCreateProject } = useOrgPermission();
   const [projects, setProjects] = useState<Project[]>([]);
+  const [tree, setTree] = useState<ProjectTree>(EMPTY_PROJECT_TREE);
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [progressByProjectId, setProgressByProjectId] = useState<Record<string, number>>({});
+
+  const loadProjects = useCallback(async () => {
+    const query = buildScopeQuery(currentOrg?.organizationId || null);
+    const [listRes, treeRes] = await Promise.all([
+      authFetch(`/projects${query}`),
+      authFetch(`/projects/tree${query}`),
+    ]);
+    if (listRes.ok) {
+      const data = await listRes.json();
+      setProjects(data.filter((project: any) => !project.isDeleted));
+    }
+    if (treeRes.ok) {
+      const data = await treeRes.json();
+      setTree({
+        folders: Array.isArray(data.folders) ? data.folders : [],
+        files: Array.isArray(data.files) ? data.files : [],
+        projects: Array.isArray(data.projects) ? data.projects : [],
+      });
+    }
+  }, [currentOrg?.organizationId]);
+
+  const loadProgress = useCallback(async () => {
+    const query = buildScopeQuery(currentOrg?.organizationId || null);
+    const response = await authFetch(`/dashboard/project-progress${query}`);
+    if (response.ok) {
+      const data = await response.json();
+      const map: Record<string, number> = {};
+      if (Array.isArray(data)) {
+        data.forEach((entry: any) => {
+          if (entry.projectId) map[entry.projectId] = entry.progress;
+        });
+      }
+      setProgressByProjectId(map);
+    }
+  }, [currentOrg?.organizationId]);
 
   useEffect(() => {
     const token = localStorage.getItem("token");
@@ -40,37 +111,25 @@ export default function ProjectsPage() {
       return;
     }
 
-    const query = currentOrg
-      ? `?organizationId=${currentOrg.organizationId}`
-      : "?personal=true";
-
-    const loadProjects = async () => {
-      const response = await authFetch(`/projects${query}`);
-      if (response.ok) {
-       const data = await response.json();
-        setProjects(
-          data.filter((project: any) => !project.isDeleted)
-        );
-      }
-    };
-
-    const loadProgress = async () => {
-      const response = await authFetch(`/dashboard/project-progress${query}`);
-      if (response.ok) {
-        const data = await response.json();
-        const map: Record<string, number> = {};
-        if (Array.isArray(data)) {
-          data.forEach((entry: any) => {
-            if (entry.projectId) map[entry.projectId] = entry.progress;
-          });
-        }
-        setProgressByProjectId(map);
-      }
-    };
-
     loadProjects();
     loadProgress();
-  }, [currentOrg, router]);
+
+    const refresh = () => {
+      loadProjects();
+      loadProgress();
+    };
+    window.addEventListener("workspace-changed", refresh);
+    window.addEventListener("focus", refresh);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") refresh();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.removeEventListener("workspace-changed", refresh);
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [currentOrg, router, loadProjects, loadProgress]);
 
   const deriveStatus = (
     projectId: string
@@ -150,6 +209,12 @@ export default function ProjectsPage() {
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder="Search projects..."
+              type="search"
+              name="projects-search"
+              autoComplete="off"
+              data-1p-ignore
+              data-lpignore="true"
+              data-form-type="other"
               className="field-input pl-10"
             />
           </div>
@@ -170,6 +235,55 @@ export default function ProjectsPage() {
             ))}
           </div>
         </div>
+
+        {(tree.folders.length > 0 || tree.files.length > 0) && (
+          <div className="mb-8 grid gap-4 md:grid-cols-2">
+            {tree.folders.map((folder) => (
+              <div
+                key={folder._id}
+                className="rounded-2xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900"
+              >
+                <p className="mb-2 flex items-center gap-2 text-sm font-semibold text-slate-700 dark:text-slate-200">
+                  <Folder size={16} className="text-amber-500" />
+                  {folder.name}
+                </p>
+                {folder.projects.length === 0 ? (
+                  <p className="text-xs text-slate-400">No projects in this folder</p>
+                ) : (
+                  <NestedProjectLinks
+                    nodes={folder.projects}
+                    onOpen={(id) => {
+                      localStorage.setItem("currentProjectId", id);
+                      router.push(`/projects/${id}`);
+                    }}
+                  />
+                )}
+              </div>
+            ))}
+            {tree.files.map((file) => (
+              <div
+                key={file._id}
+                className="rounded-2xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900"
+              >
+                <p className="mb-2 flex items-center gap-2 text-sm font-semibold text-slate-700 dark:text-slate-200">
+                  <FileText size={16} className="text-sky-500" />
+                  {file.name}
+                </p>
+                {file.projects.length === 0 ? (
+                  <p className="text-xs text-slate-400">No projects in this file</p>
+                ) : (
+                  <NestedProjectLinks
+                    nodes={file.projects}
+                    onOpen={(id) => {
+                      localStorage.setItem("currentProjectId", id);
+                      router.push(`/projects/${id}`);
+                    }}
+                  />
+                )}
+              </div>
+            ))}
+          </div>
+        )}
 
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
           {filteredProjects.map((project) => {

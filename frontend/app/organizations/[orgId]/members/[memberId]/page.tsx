@@ -5,6 +5,7 @@ import { useParams, useRouter } from "next/navigation";
 import Navbar from "@/components/navbar/Navbar";
 import Sidebar from "@/components/sidebar/sidebar";
 import { authFetch } from "@/lib/validation/authFetch";
+import { appendWorkspaceScope } from "@/lib/workspaceStorage";
 import { useOrgPermission } from "@/hooks/useOrgPermissions";
 import { useOrgRoles } from "@/hooks/useOrgRoles";
 import { PeriodToggle, STATUS_STYLES, type Period, type ProjectBreakdownItem } from "@/components/reports/ReportCharts";
@@ -164,6 +165,7 @@ export default function MemberReportPage() {
     setLoadingReport(true);
     try {
       const params = new URLSearchParams({ organizationId: orgId, period });
+      appendWorkspaceScope(params);
       const res = await authFetch(`/dashboard/reports/member/${memberId}?${params.toString()}`);
       if (res.status === 403) {
         setNotAllowed(true);
@@ -189,6 +191,12 @@ export default function MemberReportPage() {
   useEffect(() => {
     void loadReport();
   }, [loadReport, refreshKey]);
+
+  useEffect(() => {
+    const onWorkspaceChange = () => setRefreshKey((k) => k + 1);
+    window.addEventListener("workspace-changed", onWorkspaceChange);
+    return () => window.removeEventListener("workspace-changed", onWorkspaceChange);
+  }, []);
 
   const filteredTasks = useMemo(() => {
     if (activeView === "assigned" || activeView === null) return recentTasks;

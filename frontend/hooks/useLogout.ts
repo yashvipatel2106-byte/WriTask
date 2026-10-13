@@ -16,6 +16,10 @@ export function useLogout() {
     dispatch(clearUserState());
     dispatch(clearOrgState());
     dispatch(clearDashboardCharts());
+    // Lets SocketProvider (and anything else listening) know the
+    // session ended without needing a full page reload — the socket
+    // connection carries the now-cleared JWT otherwise.
+    window.dispatchEvent(new Event("auth-changed"));
     router.push("/login");
   };
 }

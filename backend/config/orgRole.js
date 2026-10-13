@@ -13,7 +13,13 @@ const ORG_ROLE_PERMISSIONS = {
     "org:manageMembers",
     "org:viewAdmin",
     "org:viewMembers",
+
+    // Request Forms
+    "requestForm:submit",
+    "requestForm:manage",
+    "requestForm:review",
   ],
+
   admin: [
     "org:read",
     "org:update",
@@ -24,10 +30,39 @@ const ORG_ROLE_PERMISSIONS = {
     "org:manageMembers",
     "org:viewAdmin",
     "org:viewMembers",
+
+    // Request Forms — Admin has the same Request Forms
+    // rights as Owner (create/manage/review); this is
+    // enforced independently of these permission flags
+    // by a hardcoded Owner/Admin role check on the
+    // backend for create/manage endpoints.
+    "requestForm:submit",
+    "requestForm:manage",
+    "requestForm:review",
   ],
-  manager: ["org:read", "org:createProject"],
-  developer: ["org:read"],
-  viewer: ["org:read"],
+
+  manager: [
+    "org:read",
+    "org:createProject",
+
+    // Request Forms
+    "requestForm:submit",
+    
+  ],
+
+  developer: [
+    "org:read",
+
+    // Request Forms
+    "requestForm:submit",
+  ],
+
+  viewer: [
+    "org:read",
+
+    // Viewers can submit requests.
+    "requestForm:submit",
+  ],
 };
 
 const ORG_ROLE_LEVEL = {

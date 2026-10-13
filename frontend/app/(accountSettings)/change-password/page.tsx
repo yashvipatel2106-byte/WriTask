@@ -3,8 +3,10 @@
 import { useState } from "react";
 import { toast } from "@/components/ui/toast";
 import { authFetch } from "@/lib/validation/authFetch";
+import { useOrganization } from "@/components/context/organizationContext";
 
 export default function ChangePasswordPage() {
+  const { currentOrg } = useOrganization();
   const [form, setForm] = useState({
     currentPassword: "",
     newPassword: "",
@@ -34,6 +36,7 @@ export default function ChangePasswordPage() {
         body: JSON.stringify({
           currentPassword: form.currentPassword,
           newPassword: form.newPassword,
+          organizationId: currentOrg?.organizationId || undefined,
         }),
       });
       const data = await res.json().catch(() => ({}));
@@ -43,7 +46,16 @@ export default function ChangePasswordPage() {
         return;
       }
 
-       toast.success("Password updated successfully");
+      if (data.token) {
+        localStorage.setItem("token", data.token);
+      }
+
+      toast.success(
+        data.message ||
+          (currentOrg?.name
+            ? `Password updated for ${currentOrg.name}`
+            : "Password updated successfully")
+      );
       setForm({ currentPassword: "", newPassword: "", confirmPassword: "" });
     } catch {
       setError("Something went wrong. Please try again.");
@@ -68,7 +80,9 @@ export default function ChangePasswordPage() {
           </h1>
 
           <p className="text-slate-500 mt-2 dark:text-slate-400">
-            Keep your account secure by updating your password regularly.
+            {currentOrg?.name
+              ? `Updates the password for ${currentOrg.name} only. Other organizations stay unchanged.`
+              : "Keep your account secure by updating your password regularly."}
           </p>
 
         </div>

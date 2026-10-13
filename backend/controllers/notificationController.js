@@ -1,28 +1,4 @@
 const Notification = require("../models/Notification");
-const Project = require("../models/Project");
-
-async function getScopedProjectIds(userId, { organizationId, personal }) {
-  const baseFilter = {
-    isDeleted: { $ne: true },
-    "members.user": userId,
-  };
-
-  if (organizationId) {
-    return Project.find({
-      ...baseFilter,
-      organization: organizationId,
-    }).distinct("_id");
-  }
-
-  if (personal === "true") {
-    return Project.find({
-      ...baseFilter,
-      organization: null,
-    }).distinct("_id");
-  }
-
-  return null;
-}
 
 async function buildUserFilter(userId, query) {
   const filter = {
@@ -50,15 +26,9 @@ async function buildUserFilter(userId, query) {
     ];
   }
 
-  const projectIds = await getScopedProjectIds(userId, query);
-  if (projectIds) {
-    // Include `null` alongside the org's actual project ids — otherwise
-    // any notification with no projectId (leave requests/approvals, which
-    // aren't tied to a project) gets silently excluded from every org-scoped
-    // view, even though it was created successfully. `$in` with `null`
-    // matches both a literal null value and a missing field.
-    filter.projectId = { $in: [...projectIds, null] };
-  }
+  // Notifications are already per-user. Do not filter by org/workspace/project —
+  // that hid valid alerts when the org switcher or project membership did not
+  // line up with where the notification was created.
 
   return filter;
 }

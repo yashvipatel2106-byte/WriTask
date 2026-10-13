@@ -1,8 +1,10 @@
+const mongoose = require("mongoose");
 const User = require("../models/user");
 const Organization = require("../models/Organization");
 const Project = require("../models/Project");
 const Task = require("../models/Task");
 const Activity = require("../models/activity");
+const { buildProjectListFilter } = require("../utils/projectAccess");
 const summaryService = require("../services/reports/summaryService");
 const projectPerformanceService = require("../services/reports/projectPerformanceService");
 const taskDistributionService = require("./reports/taskDistributionService");
@@ -17,7 +19,12 @@ const { getWeekRange, getWeekLabel } = require("../utils/reportWeek");
 class ReportService {
   async getWeeklyReport(
     userId,
-    { organizationId = null, referenceDate = new Date() } = {}
+    {
+      organizationId = null,
+      workspaceId = null,
+      personal = false,
+      referenceDate = new Date(),
+    } = {}
   ) {
     const user = await User.findById(userId).select(
       "username email designation department location phone bio status settings"
@@ -47,12 +54,18 @@ class ReportService {
     }
 
     const projectFilter = {
-      "members.user": userId,
       isDeleted: false,
     };
-    if (organization) {
-      projectFilter.organization = organization._id;
+
+    const scoped = await buildProjectListFilter(userId, {
+      organizationId: organization?._id?.toString() || organizationId || undefined,
+      personal: personal ? "true" : undefined,
+      workspaceId: workspaceId || undefined,
+    });
+    if (scoped.error) {
+      throw new Error(scoped.error.message);
     }
+    Object.assign(projectFilter, scoped.filter);
 
     const projects = await Project.find(projectFilter)
       .populate("owner", "username email designation")

@@ -6,6 +6,10 @@ import type {
   ProjectProgressItem,
   TaskOverviewData,
 } from "@/store/types/dashboard";
+import {
+  buildDashboardScopeKey,
+  buildScopeQuery,
+} from "@/lib/workspaceStorage";
 
 // ── helpers ──────────────────────────────────────────────────────────────
 
@@ -18,15 +22,10 @@ export const EMPTY_TASK_OVERVIEW: TaskOverviewData = {
   customStatuses: [],
 };
 
-/** Build cache key from org id (or "personal") */
-export function buildDashboardScopeKey(orgId: string | null) {
-  return orgId ?? "personal";
-}
+export { buildDashboardScopeKey };
 
 function buildOrgQuery(orgId: string | null) {
-  return orgId
-    ? `?organizationId=${encodeURIComponent(orgId)}`
-    : "?personal=true";
+  return buildScopeQuery(orgId);
 }
 
 export function createInitialDashboardState(): DashboardChartsState {

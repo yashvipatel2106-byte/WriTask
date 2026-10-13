@@ -1,6 +1,7 @@
 "use client";
 
 import { useOrganization } from "@/components/context/organizationContext";
+import { useOrgPermission } from "@/hooks/useOrgPermissions";
 import { authFetch } from "@/lib/validation/authFetch";
 import { clearStoredProjectId } from "@/lib/orgStorage";
 import { toast } from "@/components/ui/toast";
@@ -10,6 +11,7 @@ import { useEffect, useState } from "react";
 export default function CreateOrganizationSettingsPage() {
   const router = useRouter();
   const { refreshAccess, setCurrentOrgId } = useOrganization();
+  const { canCreateOrganization, orgReady } = useOrgPermission();
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [loading, setLoading] = useState(false);
@@ -18,6 +20,15 @@ export default function CreateOrganizationSettingsPage() {
     const token = localStorage.getItem("token");
     if (!token) router.push("/login");
   }, [router]);
+
+  useEffect(() => {
+    if (!orgReady) return;
+    if (!canCreateOrganization) router.replace("/settings/organization");
+  }, [orgReady, canCreateOrganization, router]);
+
+  if (orgReady && !canCreateOrganization) {
+    return null;
+  }
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();

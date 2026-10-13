@@ -12,7 +12,7 @@ import {
   Users, Filter, Download, RefreshCw, UserX,
 } from "lucide-react";
 import { ModalHeader, ModalShell } from "@/components/ui/Modal";
-import Select from "@/components/ui/Select";
+import Select, { fieldSelectTriggerClass } from "@/components/ui/Select";
 import { useOrganization } from "@/components/context/organizationContext";
 import { useOrgRoles } from "@/hooks/useOrgRoles";
 import { useOrgPermission } from "@/hooks/useOrgPermissions";
@@ -798,47 +798,49 @@ const handleRefresh = () => {
 
             {/* Role filter */}
             <div className="relative">
-              <Filter size={12} className="absolute left-3.5 top-3.5 text-slate-400 dark:text-slate-500" />
-              <select
-                className="pl-9 pr-8 py-3 bg-white border border-slate-200 rounded-xl text-slate-600 text-sm appearance-none focus:outline-none focus:ring-2 focus:ring-cyan-500/30 transition dark:bg-slate-800 dark:border-slate-700 dark:text-slate-300 dark:focus:ring-cyan-500/20"
+              <Filter size={12} className="pointer-events-none absolute left-3.5 top-1/2 z-10 -translate-y-1/2 text-slate-400 dark:text-slate-500" />
+              <Select
                 value={roleFilter}
-                onChange={e => setRoleFilter(e.target.value)}
-              >
-                <option value="All">All Roles</option>
-                {roles
-                  .filter((role) => role.id !== "owner")
-                  .map((role) => (
-                    <option key={role.id} value={role.id}>
-                      {role.name}
-                    </option>
-                  ))}
-              </select>
-              <ChevronDown size={12} className="absolute right-3 top-3.5 text-slate-400 pointer-events-none dark:text-slate-500" />
+                onChange={setRoleFilter}
+                className="w-full min-w-[140px]"
+                triggerClassName={(open) =>
+                  fieldSelectTriggerClass(open, "pl-9 pr-3")
+                }
+                options={[
+                  { value: "All", label: "All Roles" },
+                  ...roles
+                    .filter((role) => role.id !== "owner")
+                    .map((role) => ({ value: role.id, label: role.name })),
+                ]}
+              />
             </div>
 
             {/* Status filter */}
             <div className="relative">
-              <select
-                className="px-4 pr-8 py-3 bg-white border border-slate-200 rounded-xl text-slate-600 text-sm appearance-none focus:outline-none focus:ring-2 focus:ring-cyan-500/30 transition dark:bg-slate-800 dark:border-slate-700 dark:text-slate-300 dark:focus:ring-cyan-500/20"
+              <Select
                 value={statusFilter}
-                onChange={e => setStatusFilter(e.target.value)}
-              >
-                <option value="All">All Status</option>
-                {STATUS_OPTIONS.map(s => <option key={s}>{s}</option>)}
-              </select>
-              <ChevronDown size={12} className="absolute right-3 top-3.5 text-slate-400 pointer-events-none dark:text-slate-500" />
+                onChange={setStatusFilter}
+                className="w-full min-w-[130px]"
+                triggerClassName={fieldSelectTriggerClass}
+                options={[
+                  { value: "All", label: "All Status" },
+                  ...STATUS_OPTIONS.map((s) => ({ value: s, label: s })),
+                ]}
+              />
             </div>
 
             {/* Department filter */}
             <div className="relative">
-              <select
-                className="px-4 pr-8 py-3 bg-white border border-slate-200 rounded-xl text-slate-600 text-sm appearance-none focus:outline-none focus:ring-2 focus:ring-cyan-500/30 transition dark:bg-slate-800 dark:border-slate-700 dark:text-slate-300 dark:focus:ring-cyan-500/20"
+              <Select
                 value={deptFilter}
-                onChange={e => setDeptFilter(e.target.value)}
-              >
-                {deptOptions.map(d => <option key={d} value={d}>{d === "All" ? "All Depts" : d}</option>)}
-              </select>
-              <ChevronDown size={12} className="absolute right-3 top-3.5 text-slate-400 pointer-events-none dark:text-slate-500" />
+                onChange={setDeptFilter}
+                className="w-full min-w-[130px]"
+                triggerClassName={fieldSelectTriggerClass}
+                options={deptOptions.map((d) => ({
+                  value: d,
+                  label: d === "All" ? "All Depts" : d,
+                }))}
+              />
             </div>
           </div>
 

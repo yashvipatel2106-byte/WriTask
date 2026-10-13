@@ -14,6 +14,11 @@ const { getIO } = require("../socket/socket");
 const EVENTS = require("../socket/events");
 const { assertNoAssigneesOnLeave } = require("../utils/leaveValidation");
 const { notifyRecipients } = require("../utils/notificationService");
+const { buildProjectListFilter } = require("../utils/projectAccess");
+const {
+  getWorkspaceForUser,
+  listWorkspacesForUser,
+} = require("../utils/workspaces");
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 /** Verify the requesting user belongs to the org (lean — only fields needed for membership). */
@@ -77,6 +82,165 @@ function ensureMeetingRoom(event, req) {
 }
 
 const CALENDAR_TYPE_LABEL = { task: "task", meeting: "meeting", reminder: "reminder" };
+
+async function getWorkspaceProjectIdSet(userId, orgId, workspaceId) {
+  if (!workspaceId) return null;
+  const result = await buildProjectListFilter(userId, {
+    organizationId: orgId,
+    workspaceId,
+  });
+  if (result.error) {
+    throw Object.assign(new Error(result.error.message), {
+      status: result.error.status,
+    });
+  }
+  const rows = await Project.find(result.filter).select("_id").lean();
+  return new Set(rows.map((p) => p._id.toString()));
+}
+
+function eventWorkspaceId(event) {
+  if (!event?.workspace) return null;
+  if (event.workspace._id) return String(event.workspace._id);
+  return String(event.workspace);
+}
+
+function eventProjectId(event) {
+  const rawProject = event?.taskRef?.project;
+  if (!rawProject) return null;
+  return rawProject._id != null ? String(rawProject._id) : String(rawProject);
+}
+
+function spaceMatchesWorkspace(space, scope) {
+  const name = String(space || "").trim().toLowerCase();
+  if (!name) return false;
+  return (
+    name === String(scope.name || "").toLowerCase() ||
+    name === String(scope.kind || "").toLowerCase()
+  );
+}
+
+/**
+ * Resolve the workspace an event should belong to.
+ * Prefers explicit workspaceId, then space name, then the linked project.
+ */
+async function resolveCalendarWorkspace(
+  userId,
+  orgId,
+  { workspaceId, space, project } = {}
+) {
+  let workspaces = [];
+  try {
+    workspaces = await listWorkspacesForUser(userId, { organizationId: orgId });
+  } catch {
+    workspaces = [];
+  }
+
+  const byId = (id) =>
+    id ? workspaces.find((w) => String(w.id) === String(id)) : null;
+  const byName = (value) => {
+    if (!value) return null;
+    const n = String(value).trim().toLowerCase();
+    return (
+      workspaces.find((w) => String(w.name).toLowerCase() === n) ||
+      workspaces.find((w) => String(w.kind).toLowerCase() === n) ||
+      null
+    );
+  };
+
+  let match = byId(workspaceId);
+  if (!match && workspaceId) {
+    const ws = await getWorkspaceForUser(userId, workspaceId);
+    if (ws) {
+      return { workspaceId: String(ws._id), space: ws.name };
+    }
+  }
+  if (!match) match = byName(space);
+
+  const projectWs = project?.workspace?._id || project?.workspace;
+  if (!match && projectWs) match = byId(projectWs);
+
+  if (!match) {
+    match =
+      byName("Internal") ||
+      workspaces.find((w) => w.kind === "internal") ||
+      workspaces[0] ||
+      null;
+  }
+
+  if (match) {
+    return { workspaceId: match.id, space: match.name };
+  }
+  return { workspaceId: null, space: space || "Internal" };
+}
+
+async function getCalendarWorkspaceScope(userId, orgId, workspaceId) {
+  if (!workspaceId) return null;
+  const ws = await getWorkspaceForUser(userId, workspaceId);
+  if (!ws) {
+    throw Object.assign(new Error("Invalid or inaccessible workspace"), {
+      status: 400,
+    });
+  }
+  const projectIdSet = await getWorkspaceProjectIdSet(
+    userId,
+    orgId,
+    workspaceId
+  );
+  return {
+    workspaceId: String(ws._id),
+    name: ws.name,
+    kind: ws.kind,
+    projectIdSet: projectIdSet || new Set(),
+  };
+}
+
+function filterCalendarEventsByWorkspace(events, scope) {
+  if (!scope) return events;
+  return events.filter((event) => {
+    if (event.type === "leave") return false;
+
+    const eventWs = eventWorkspaceId(event);
+    if (eventWs) return eventWs === scope.workspaceId;
+
+    if (spaceMatchesWorkspace(event.space, scope)) return true;
+
+    const projectId = eventProjectId(event);
+    if (projectId && scope.projectIdSet.has(projectId)) return true;
+
+    const spaceName = String(event.space || "").trim();
+    const isLegacyInternal =
+      !eventWs && !projectId && (!spaceName || spaceName.toLowerCase() === "internal");
+    if (
+      isLegacyInternal &&
+      (scope.kind === "internal" ||
+        String(scope.name || "").toLowerCase() === "internal")
+    ) {
+      return true;
+    }
+    return false;
+  });
+}
+
+async function getOrgProjectsForScope(userId, orgId, workspaceId) {
+  if (!workspaceId) {
+    return Project.find({
+      organization: orgId,
+      isDeleted: { $ne: true },
+    })
+      .select("_id title")
+      .lean();
+  }
+  const result = await buildProjectListFilter(userId, {
+    organizationId: orgId,
+    workspaceId,
+  });
+  if (result.error) {
+    throw Object.assign(new Error(result.error.message), {
+      status: result.error.status,
+    });
+  }
+  return Project.find(result.filter).select("_id title").lean();
+}
 
 /** Notify newly-assigned users a task/meeting/reminder was put on their calendar. */
 async function notifyCalendarAssignment({ event, assigneeIds, actorId, isNew }) {
@@ -248,7 +412,14 @@ async function getCalendarEvents(req, res) {
       },
     ]);
 
-    res.json({ success: true, data: events });
+    const workspaceScope = await getCalendarWorkspaceScope(
+      userId,
+      orgId,
+      req.query.workspaceId
+    );
+    const data = filterCalendarEventsByWorkspace(events, workspaceScope);
+
+    res.json({ success: true, data });
   } catch (err) {
     res.status(err.status || 500).json({ success: false, message: err.message });
   }
@@ -264,7 +435,7 @@ async function createCalendarEvent(req, res) {
 
     await assertOrgMember(orgId, userId);
 
-    const { title, description, date, time, type, priority, assignees, space, taskRef, projectId, status } = req.body;
+    const { title, description, date, time, type, priority, assignees, space, workspaceId, taskRef, projectId, status } = req.body;
     const assigneeIds = Array.isArray(assignees) ? assignees.filter(Boolean) : [];
 
     if (assigneeIds.length > 0 && date) {
@@ -290,6 +461,7 @@ async function createCalendarEvent(req, res) {
     let linkedTaskId = taskRef || null;
     let createdTask = null;
     let resolvedProjectName = "";
+    let linkedProject = null;
 
     if (type === "task" && (projectId || status)) {
       if (!projectId || !status) {
@@ -303,6 +475,7 @@ async function createCalendarEvent(req, res) {
       if (!project || project.isDeleted) {
         return res.status(404).json({ success: false, message: "Project not found" });
       }
+      linkedProject = project;
 
       const permissions = await resolveEffectiveProjectPermissions(project, userId);
       if (!userHasProjectPermission(permissions, "task:create")) {
@@ -327,6 +500,12 @@ async function createCalendarEvent(req, res) {
       linkedTaskId = createdTask._id;
     }
 
+    const workspaceScope = await resolveCalendarWorkspace(userId, orgId, {
+      workspaceId,
+      space,
+      project: linkedProject,
+    });
+
     // createTaskService already upserts a linked calendar row when dueDate is
     // set. Reuse that event so we don't create duplicates for Type=Task.
     let event = linkedTaskId
@@ -341,7 +520,8 @@ async function createCalendarEvent(req, res) {
       event.type = type || event.type;
       event.priority = priority || event.priority;
       event.assignees = assigneeIds;
-      event.space = space || event.space || "Internal";
+      event.space = workspaceScope.space;
+      event.workspace = workspaceScope.workspaceId || event.workspace || null;
       if (resolvedProjectName) event.projectName = resolvedProjectName;
       if (meeting) event.meeting = meeting;
       await event.save();
@@ -354,7 +534,8 @@ async function createCalendarEvent(req, res) {
         type,
         priority,
         assignees: assigneeIds,
-        space:     space || "Internal",
+        space: workspaceScope.space,
+        workspace: workspaceScope.workspaceId || null,
         taskRef:   linkedTaskId,
         organization: orgId,
         createdBy: userId,
@@ -419,6 +600,15 @@ async function updateCalendarEvent(req, res) {
         ? req.body[k].filter(Boolean)
         : req.body[k];
     });
+
+    if (req.body.workspaceId !== undefined || req.body.space !== undefined) {
+      const workspaceScope = await resolveCalendarWorkspace(userId, orgId, {
+        workspaceId: req.body.workspaceId,
+        space: req.body.space !== undefined ? req.body.space : event.space,
+      });
+      event.space = workspaceScope.space;
+      event.workspace = workspaceScope.workspaceId || event.workspace || null;
+    }
 
     // Only notify whoever is newly added this call — re-saving with the same
     // assignee list on every edit shouldn't re-notify them each time.
@@ -762,6 +952,13 @@ async function getOrgMembersWithStats(req, res) {
     const monthParam = req.query.month || toDateKey(new Date()).slice(0, 7);
     const { from, to } = monthRange(monthParam);
     const orgObjectId = toObjectId(orgId);
+    const workspaceScope = await getCalendarWorkspaceScope(
+      userId,
+      orgId,
+      req.query.workspaceId
+    );
+    const workspaceName = String(workspaceScope?.name || "").toLowerCase();
+    const workspaceKind = String(workspaceScope?.kind || "").toLowerCase();
 
     // One pipeline: org → owner/member users → per-assignee event counts for the month
     const [result] = await Organization.aggregate([
@@ -796,6 +993,39 @@ async function getOrgMembersWithStats(req, res) {
                     { $eq: ["$organization", "$$oid"] },
                     { $gte: ["$date", from] },
                     { $lte: ["$date", to] },
+                    { $ne: ["$type", "leave"] },
+                    ...(workspaceScope
+                      ? [
+                          {
+                            $or: [
+                              {
+                                $eq: [
+                                  "$workspace",
+                                  toObjectId(workspaceScope.workspaceId),
+                                ],
+                              },
+                              {
+                                $eq: [
+                                  { $toLower: { $ifNull: ["$space", ""] } },
+                                  workspaceName,
+                                ],
+                              },
+                              ...(workspaceKind
+                                ? [
+                                    {
+                                      $eq: [
+                                        {
+                                          $toLower: { $ifNull: ["$space", ""] },
+                                        },
+                                        workspaceKind,
+                                      ],
+                                    },
+                                  ]
+                                : []),
+                            ],
+                          },
+                        ]
+                      : []),
                   ],
                 },
               },
@@ -822,14 +1052,12 @@ async function getOrgMembersWithStats(req, res) {
       return res.status(404).json({ success: false, message: "Organisation not found" });
     }
 
-    // Count real Task documents assigned to each member across this org's
-    // projects (includes multi-assignee tasks from Excel import / board).
-    const orgProjects = await Project.find({
-      organization: orgObjectId,
-      isDeleted: { $ne: true },
-    })
-      .select("_id")
-      .lean();
+    // Count real Task documents assigned to each member across scoped org projects.
+    const orgProjects = await getOrgProjectsForScope(
+      userId,
+      orgId,
+      req.query.workspaceId
+    );
     const projectIds = orgProjects.map((p) => p._id);
 
     const taskCountRows =
@@ -923,12 +1151,11 @@ async function getMemberAssignedTasks(req, res) {
       return res.status(400).json({ success: false, message: "Invalid member id" });
     }
 
-    const orgProjects = await Project.find({
-      organization: orgObjectId,
-      isDeleted: { $ne: true },
-    })
-      .select("_id title")
-      .lean();
+    const orgProjects = await getOrgProjectsForScope(
+      userId,
+      orgId,
+      req.query.workspaceId
+    );
     const projectIds = orgProjects.map((p) => p._id);
     const projectTitleById = Object.fromEntries(
       orgProjects.map((p) => [p._id.toString(), p.title || ""])
@@ -994,6 +1221,23 @@ async function syncTasksToCalendar(req, res) {
     const orgObjectId = toObjectId(orgId);
     const actorId = toObjectId(userId);
 
+    let workspaceProjectMatch = {};
+    if (req.query.workspaceId) {
+      const scoped = await getOrgProjectsForScope(
+        userId,
+        orgId,
+        req.query.workspaceId
+      );
+      const scopedIds = scoped.map((p) => p._id);
+      if (!scopedIds.length) {
+        return res.json({
+          success: true,
+          message: "No tasks to sync in this workspace",
+        });
+      }
+      workspaceProjectMatch = { "projectDoc._id": { $in: scopedIds } };
+    }
+
     // One aggregation: org projects → tasks with due dates (no N+1 project lookups)
     const tasks = await Task.aggregate([
       {
@@ -1006,12 +1250,21 @@ async function syncTasksToCalendar(req, res) {
       },
       { $unwind: "$projectDoc" },
       {
+        $lookup: {
+          from: "workspaces",
+          localField: "projectDoc.workspace",
+          foreignField: "_id",
+          as: "_workspace",
+        },
+      },
+      {
         $match: {
           "projectDoc.organization": orgObjectId,
           "projectDoc.isDeleted": { $ne: true },
           dueDate: { $ne: null },
           isDeleted: { $ne: true },
           $or: [{ isActive: true }, { isActive: { $exists: false } }],
+          ...workspaceProjectMatch,
         },
       },
       {
@@ -1024,18 +1277,25 @@ async function syncTasksToCalendar(req, res) {
           assignees: 1,
           createdBy: 1,
           projectTitle: "$projectDoc.title",
+          projectWorkspace: "$projectDoc.workspace",
+          workspaceName: { $arrayElemAt: ["$_workspace.name", 0] },
         },
       },
     ]);
 
     const taskIds = tasks.map((t) => t._id);
 
-    // Drop calendar rows for tasks that no longer qualify
-    await CalendarEvent.deleteMany({
+    // Drop calendar rows for tasks that no longer qualify. When scoped to a
+    // workspace, only touch events in that workspace so other spaces stay intact.
+    const staleFilter = {
       organization: orgObjectId,
       type: "task",
       taskRef: { $exists: true, $ne: null, $nin: taskIds },
-    });
+    };
+    if (req.query.workspaceId) {
+      staleFilter.workspace = toObjectId(req.query.workspaceId);
+    }
+    await CalendarEvent.deleteMany(staleFilter);
 
     if (tasks.length === 0) {
       return res.json({ success: true, message: "Synced: 0 created, 0 updated" });
@@ -1067,7 +1327,8 @@ async function syncTasksToCalendar(req, res) {
               date: dateKey,
               priority: task.priority || "medium",
               assignees: assigneeIds,
-              space: "Internal",
+              space: task.workspaceName || "Internal",
+              workspace: task.projectWorkspace || null,
               organization: orgObjectId,
               projectName: task.projectTitle || "",
               type: "task",

@@ -3,6 +3,7 @@ import { Geist, Geist_Mono } from "next/font/google";
 import Providers from "@/components/Provider";
 import "./globals.css";
 import { SocketProvider } from "@/components/context/SocketProvider";
+import { PresenceProvider } from "@/components/context/PresenceProvider";
 import { themeInitScript } from "@/components/context/themeContext";
 
 const geistSans = Geist({ variable: "--font-geist-sans", subsets: ["latin"] });
@@ -39,7 +40,9 @@ export default function RootLayout({
       </head>
       <body className="min-h-full flex flex-col">
         <SocketProvider>
-          <Providers>{children}</Providers>
+          <PresenceProvider>
+            <Providers>{children}</Providers>
+          </PresenceProvider>
         </SocketProvider>
       </body>
     </html>

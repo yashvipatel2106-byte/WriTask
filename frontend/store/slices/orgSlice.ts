@@ -16,17 +16,18 @@ function resolveOrgIdFromAccess(
   access: OrgAccessData,
   preferredId: string | null
 ): string | null {
+  // Keep an explicit personal selection (null) — do not force the first org.
+  if (!preferredId) {
+    return null;
+  }
+
   if (
-    preferredId &&
     access.organizations.some((org) => org.organizationId === preferredId)
   ) {
     return preferredId;
   }
 
-  if (access.organizations.length > 0) {
-    return access.organizations[0].organizationId;
-  }
-
+  // Preferred org is no longer valid — fall back to Personal Workspace.
   return null;
 }
 

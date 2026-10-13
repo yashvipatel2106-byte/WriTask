@@ -16,6 +16,7 @@ export type UserProfile = {
   bio?: string;
   avatarColor?: string; 
   systemRole?: string;
+  colorTheme?: string | null;
   profileMeta?: UserProfileMeta;
 };
 

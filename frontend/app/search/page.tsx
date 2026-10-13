@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import Navbar from "@/components/navbar/Navbar";
 import Sidebar from "@/components/sidebar/sidebar";
 import SearchResultsList from "@/components/search/SearchResultsList";
+import { useOrganization } from "@/components/context/organizationContext";
 import { useSearchQuery } from "@/lib/useSearchQuery";
 import { Search } from "lucide-react";
 
@@ -13,8 +14,13 @@ function SearchPageContent() {
   const searchParams = useSearchParams();
   const initialQuery = searchParams.get("q") || "";
 
+  const { currentOrgId } = useOrganization();
+  const searchScope = currentOrgId
+    ? { organizationId: currentOrgId }
+    : { personal: true };
+
   const [query, setQuery] = useState(initialQuery);
-  const { results, isReady } = useSearchQuery(query, 20, 150);
+  const { results, isReady } = useSearchQuery(query, 20, 150, searchScope);
 
   useEffect(() => {
     const token = localStorage.getItem("token");

@@ -38,6 +38,18 @@ const {
 } = require("../utils/notificationService");
 const { getIO } = require("../socket/socket");
 const EVENTS = require("../socket/events");
+const {
+  getTaskEditableCustomFieldDefinitions,
+  validateCustomFieldValue,
+  upsertTaskCustomFieldValue,
+} = require("../utils/customFields");
+const {
+  validateDependenciesForTask,
+} = require("../utils/taskDependencies");
+const {
+  isInProgressStatus,
+  stopAllRunningForTask,
+} = require("../utils/timeTracking");
 function resolveAssigneeIds(body, fallbackSingle) {
   if (Array.isArray(body.assignees)) {
     return [...new Set(body.assignees.filter(Boolean).map(String))];
@@ -148,7 +160,8 @@ const populateTask = (query) =>
     .populate("attachments.uploadedBy", "username email avatarColor")
     .populate("comments.author", "username email avatarColor")
     .populate("comments.mentions", "username email avatarColor")
-    .populate("activityLog.actor", "username email avatarColor");
+    .populate("activityLog.actor", "username email avatarColor")
+    .populate("dependencies.taskId", "title startDate dueDate status");
 
 const populateTaskList = (query) =>
   query
@@ -156,7 +169,8 @@ const populateTaskList = (query) =>
     .populate("assignees", "username email avatarColor")
     .populate("createdBy", "username email avatarColor")
     .populate("subtasks.assignee", "username email avatarColor")
-    .populate("subtasks.assignees", "username email avatarColor");
+    .populate("subtasks.assignees", "username email avatarColor")
+    .populate("dependencies.taskId", "title startDate dueDate status");
 
 async function fetchPopulatedTask(taskId) {
   return populateTask(Task.findById(taskId)).exec();
@@ -240,20 +254,22 @@ const getTask = async (req, res) => {
 const updateTask = async (req, res) => {
   try {
     const {
-      title,
-      description,
-      status,
-      priority,
-      assignee,
-      assignees,
-      dueDate,
-      startDate,
-      order,
-      tags,
-      durationHours,
-      effortHours,
-      workingDays,
-    } = req.body;
+  title,
+  description,
+  status,
+  priority,
+  assignee,
+  assignees,
+  dueDate,
+  startDate,
+  order,
+  tags,
+  durationHours,
+  effortHours,
+  workingDays,
+  dependencies,
+  customFieldValues,
+} = req.body;
     
     const updates = {};
     if (title !== undefined) updates.title = title;
@@ -278,6 +294,71 @@ const updateTask = async (req, res) => {
     if (workingDays !== undefined) {
       updates.workingDays = normalizeWorkingDaysInput(workingDays);
     }
+    if (dependencies !== undefined) {
+      updates.dependencies = await validateDependenciesForTask({
+        Task,
+        projectId: req.project._id,
+        taskId: req.task._id,
+        dependencies,
+      });
+    }
+
+    if (customFieldValues !== undefined) {
+  if (!Array.isArray(customFieldValues)) {
+    return res.status(400).json({
+      message: "customFieldValues must be an array",
+    });
+  }
+
+  const definitions = await getTaskEditableCustomFieldDefinitions(
+    req.project
+  );
+
+  const definitionsById = new Map(
+    definitions.map((field) => [String(field.id), field])
+  );
+
+  const existingValues = Array.isArray(req.task.customFieldValues)
+    ? req.task.customFieldValues.map((row) => ({
+        fieldId: String(row.fieldId),
+        value: row.value,
+      }))
+    : [];
+
+  const valuesById = new Map(
+    existingValues.map((row) => [row.fieldId, row.value])
+  );
+
+  for (const entry of customFieldValues) {
+    const fieldId = String(entry?.fieldId || "").trim();
+
+    if (!fieldId) {
+      return res.status(400).json({
+        message: "Every custom field value must have a fieldId",
+      });
+    }
+
+    const definition = definitionsById.get(fieldId);
+
+    // Ignore stale ids (deleted fields, other-workspace fields not enabled on
+    // this project) instead of blocking the whole task save.
+    if (!definition) continue;
+
+    const validatedValue = validateCustomFieldValue(
+      definition,
+      entry.value
+    );
+
+    valuesById.set(fieldId, validatedValue);
+  }
+
+  updates.customFieldValues = Array.from(valuesById.entries())
+    .filter(([fieldId]) => definitionsById.has(fieldId))
+    .map(([fieldId, value]) => ({
+      fieldId,
+      value,
+    }));
+}
 
     const s = startDate !== undefined ? startDate || null : req.task.startDate;
     const e = dueDate !== undefined ? dueDate || null : req.task.dueDate;
@@ -348,6 +429,19 @@ const updateTask = async (req, res) => {
     const task = await fetchPopulatedTask(req.task._id);
     const io = getIO();
     io.to(task.project.toString()).emit(EVENTS.TASK_UPDATED, task);
+
+    // Auto-stop running timers when status leaves In Progress.
+    if (
+      updates.status !== undefined &&
+      updates.status !== oldStatus &&
+      !isInProgressStatus(updates.status)
+    ) {
+      await stopAllRunningForTask(task._id, {
+        stopReason: "status_changed",
+        actorId: req.user._id,
+        task,
+      });
+    }
 
     // Sync calendar when due date or fields shown on calendar events change
     const calendarFieldsTouched =
@@ -462,6 +556,12 @@ const deleteTask = async (req, res) => {
     req.task.activityLog.push(buildDeletedEntry(req.user._id));
     req.task.markModified("activityLog");
     await req.task.save();
+
+    await stopAllRunningForTask(req.task._id, {
+      stopReason: "task_deleted",
+      actorId: req.user._id,
+      task: req.task,
+    });
 
     const task = await populateTask(Task.findById(req.task._id));
 
@@ -629,12 +729,13 @@ const downloadTaskAttachment = async (req, res) => {
 
 const getUpcomingTasks = async (req, res) => {
   try {
-    const { organizationId, personal } = req.query;
+    const { organizationId, personal, workspaceId } = req.query;
     const today = startOfToday();
 
     const projectResult = await getAccessibleProjectIds(req.user._id, {
       organizationId,
       personal,
+      workspaceId,
     });
 
     if (projectResult.error) {

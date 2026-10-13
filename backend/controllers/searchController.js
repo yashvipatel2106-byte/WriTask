@@ -64,12 +64,16 @@ async function getAccessibleMemberIds(userId) {
   return Array.from(ids).map((id) => new mongoose.Types.ObjectId(id));
 }
 
-async function searchProjects(userId, regex, limit) {
-  return Project.find({
+async function searchProjects(userId, regex, limit, projectIds = null) {
+  const filter = {
     isDeleted: { $ne: true },
     "members.user": userId,
     $or: [{ title: regex }, { description: regex }],
-  })
+  };
+  if (Array.isArray(projectIds) && projectIds.length) {
+    filter._id = { $in: projectIds };
+  }
+  return Project.find(filter)
     .populate("organization", "name")
     .select("_id title description status organization")
     .sort({ updatedAt: -1 })
@@ -115,18 +119,36 @@ async function searchMembers(memberIds, userId, regex, limit) {
     .lean();
 }
 
-async function searchCalendarEvents(orgIds, regex, limit) {
+async function searchCalendarEvents(orgIds, regex, limit, projectIds = null) {
   if (!orgIds.length) return [];
 
-  return CalendarEvent.find({
+  const events = await CalendarEvent.find({
     organization: { $in: orgIds },
     $or: [{ title: regex }, { description: regex }],
   })
     .populate("organization", "name")
-    .select("_id title description date time type organization")
+    .populate({
+      path: "taskRef",
+      select: "project",
+      populate: { path: "project", select: "_id" },
+    })
+    .select("_id title description date time type organization taskRef")
     .sort({ date: -1 })
-    .limit(limit)
+    .limit(limit * 3)
     .lean();
+
+  if (Array.isArray(projectIds)) {
+    if (!projectIds.length) return [];
+    const allowed = new Set(projectIds.map((id) => id.toString()));
+    return events
+      .filter((event) => {
+        const pid = event.taskRef?.project?._id?.toString?.();
+        return pid && allowed.has(pid);
+      })
+      .slice(0, limit);
+  }
+
+  return events.slice(0, limit);
 }
 
 const globalSearch = async (req, res) => {
@@ -146,8 +168,13 @@ const globalSearch = async (req, res) => {
 
     const regex = new RegExp(escapeRegex(q), "i");
     const userId = req.user._id;
+    const scope = {
+      organizationId: req.query.organizationId,
+      personal: req.query.personal,
+      workspaceId: req.query.workspaceId,
+    };
 
-    const access = await getAccessibleProjectIds(userId);
+    const access = await getAccessibleProjectIds(userId, scope);
     if (access.error) {
       return res
         .status(access.error.status)
@@ -160,10 +187,10 @@ const globalSearch = async (req, res) => {
     ]);
 
     const [projects, tasks, members, calendar] = await Promise.all([
-      searchProjects(userId, regex, limit),
+      searchProjects(userId, regex, limit, access.ids),
       searchTasks(access.ids, regex, limit),
       searchMembers(memberIds, userId, regex, limit),
-      searchCalendarEvents(orgIds, regex, limit),
+      searchCalendarEvents(orgIds, regex, limit, access.ids),
     ]);
 
     res.json({

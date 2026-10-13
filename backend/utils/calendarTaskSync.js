@@ -6,6 +6,7 @@
 const CalendarEvent = require("../models/Calendarevent");
 const Project = require("../models/Project");
 const Task = require("../models/Task");
+const Workspace = require("../models/Workspace");
 
 function toDateKey(d) {
   return new Date(d).toISOString().slice(0, 10);
@@ -69,25 +70,36 @@ async function syncTaskToCalendar(task) {
     task.organization?._id || task.organization || null;
 
   let projectName = "";
+  let workspaceId = null;
   if (task.project?.title) {
     projectName = task.project.title;
   }
+  if (task.project?.workspace) {
+    workspaceId = resolveId(task.project.workspace);
+  }
 
-  if (!organization || !projectName) {
+  if (!organization || !projectName || !workspaceId) {
     const projectId = task.project?._id || task.project;
     if (projectId) {
       const project = await Project.findById(projectId)
-        .select("organization title")
+        .select("organization title workspace")
         .lean();
       if (project) {
         organization = organization || project.organization;
         projectName = projectName || project.title || "";
+        workspaceId = workspaceId || project.workspace || null;
       }
     }
   }
 
   if (!organization) {
     return { action: "skipped", reason: "no organization" };
+  }
+
+  let space = "Internal";
+  if (workspaceId) {
+    const ws = await Workspace.findById(workspaceId).select("name").lean();
+    if (ws?.name) space = ws.name;
   }
 
   const dateKey = toDateKey(task.dueDate);
@@ -102,7 +114,8 @@ async function syncTaskToCalendar(task) {
     type: "task",
     priority: task.priority || "medium",
     assignees: assigneeIds,
-    space: "Internal",
+    space,
+    workspace: workspaceId || null,
     taskRef: taskId,
     organization,
     projectName,
@@ -127,7 +140,8 @@ async function syncTaskToCalendar(task) {
     existing.assignees = payload.assignees;
     existing.projectName = payload.projectName;
     existing.organization = payload.organization;
-    existing.space = existing.space || payload.space;
+    existing.space = payload.space || existing.space;
+    existing.workspace = payload.workspace || existing.workspace || null;
     existing.time = existing.time || payload.time;
     if (createdBy && !existing.createdBy) existing.createdBy = createdBy;
     await existing.save();

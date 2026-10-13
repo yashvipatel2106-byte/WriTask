@@ -12,7 +12,12 @@ const { ORG_ROLE_LEVEL } = require("../config/orgRole");
 
 exports.getWeeklyReport = async (req, res) => {
   try {
-    const report = await reportService.getWeeklyReport(req.user._id);
+    const { organizationId, workspaceId, personal } = req.query;
+    const report = await reportService.getWeeklyReport(req.user._id, {
+      organizationId: organizationId || null,
+      workspaceId: workspaceId || null,
+      personal: personal === "true",
+    });
 
     res.status(200).json({
       success: true,
@@ -29,7 +34,12 @@ exports.getWeeklyReport = async (req, res) => {
 
 exports.downloadWeeklyPdf = async (req, res) => {
   try {
-    const report = await reportService.getWeeklyReport(req.user._id);
+    const { organizationId, workspaceId, personal } = req.query;
+    const report = await reportService.getWeeklyReport(req.user._id, {
+      organizationId: organizationId || null,
+      workspaceId: workspaceId || null,
+      personal: personal === "true",
+    });
     const pdf = await pdfService.generateWeeklyPdf(report);
 
     res.set({

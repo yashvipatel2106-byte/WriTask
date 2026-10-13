@@ -27,6 +27,9 @@ const reportRoutes = require('../routes/reportRoutes'); // Import the report rou
 const taskImportRoutes = require('../routes/taskImportRoutes'); // Import the task import routes
 const { getMetricsRequestHandler } = require('./telemetry');
 const contactRoutes = require('../routes/contactRoutes');
+const customFieldRoutes = require('../routes/customFieldRoutes');
+const requestFormRoutes = require("../routes/requestFormRoutes");
+const presenceRoutes = require("../routes/presenceRoutes");
  
 dotenv.config({ path: path.resolve(__dirname, '../.env') });
 // Fallback: directly parse the backend .env file if dotenv didn't set variables
@@ -77,6 +80,7 @@ app.use('/api/notifications', notificationRoutes);
 app.get('/api/tasks/upcoming', authMiddleware, getUpcomingTasks);
 app.use("/api/tasks/import", taskImportRoutes);
 app.use("/api/tasks", taskRoutes);
+app.use("/api/time-entries", require("../routes/timeEntriesGlobalRoutes"));
 app.use('/api/members', memberRoutes);
 app.use('/api/dashboard', dashboardRoutes);
 app.use("/api/settings", settingsRoutes);
@@ -93,6 +97,12 @@ app.use("/api/workload", workloadRoutes);
 app.use('/api/test', require('../routes/testRoutes')); 
 app.use("/api/reports", reportRoutes); // Mount report routes under /api/reports
 app.use("/api/contact", contactRoutes);
+app.use("/api/custom-fields", customFieldRoutes);
+app.use("/api/request-forms", requestFormRoutes);
+app.use("/api/presence", presenceRoutes);
+app.use("/api/workspaces", require("../routes/workspaceRoutes"));
+app.use("/api/folders", require("../routes/folderRoutes"));
+app.use("/api/workspace-files", require("../routes/workspaceFileRoutes"));
 // app.use(metricsMiddleware); // Add metrics middleware after all other routes
 // Add this line to include the test routes
 app.get('/', (req, res) => {
@@ -127,6 +137,12 @@ connectDB()
         startReminderScheduler();
       } catch (error) {
         console.error("Failed to start reminder scheduler:", error.message);
+      }
+      try {
+        const { startPresenceSweeper } = require("../jobs/presenceSweeper");
+        startPresenceSweeper();
+      } catch (error) {
+        console.error("Failed to start presence sweeper:", error.message);
       }
     });
     require('../jobs/scheduler').start();

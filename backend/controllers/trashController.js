@@ -2,6 +2,7 @@ const fs = require("fs");
 const path = require("path");
 const Project = require("../models/Project");
 const Task = require("../models/Task");
+const Folder = require("../models/Folder");
 const Organization = require("../models/Organization");
 const CalendarEvent = require("../models/Calendarevent");
 const OrganizationInvitation = require("../models/OrganizationInvitation");
@@ -10,6 +11,14 @@ const { uploadsRoot } = require("../middleware/uploadMiddleware");
 const { syncTaskToCalendarSafe } = require("../utils/calendarTaskSync");
 const { getIO } = require("../socket/socket");
 const EVENTS = require("../socket/events");
+const { buildProjectListFilter } = require("../utils/projectAccess");
+const { backfillLegacyProjectWorkspaces } = require("../utils/workspaces");
+const {
+  resolveContainerWorkspace,
+  assertCanCreateInOrg,
+  isValidId,
+} = require("../utils/projectHierarchy");
+const { collectDescendantFolderIds } = require("../utils/projectTrash");
 
 const notDeleted = { $ne: true };
 
@@ -41,54 +50,38 @@ function subtaskAncestorChain(task, subtask) {
 const getTrash = async (req, res) => {
   try {
     const userId = req.user._id;
-    const { organizationId, personal } = req.query;
+    const { organizationId, personal, workspaceId } = req.query;
 
-    let projectFilter = {
-      "members.user": userId,
-      isDeleted: true,
-    };
-    let organizationFilter = {
-      "members.user": userId,
-      isDeleted: true,
-    };
+    await backfillLegacyProjectWorkspaces(userId, {
+      organizationId,
+      personal,
+    });
 
-    if (organizationId) {
-      const organization = await Organization.findById(organizationId);
-      if (!organization) {
-        return res.status(404).json({ message: "Organization not found" });
-      }
-      if (!organization.isMember(userId)) {
-        return res.status(403).json({
-          message: "You are not a member of this organization",
-        });
-      }
-
-      projectFilter.organization = organizationId;
-      organizationFilter = {
-        _id: organizationId,
-        isDeleted: true,
-      };
-    } else if (personal === "true") {
-      projectFilter.organization = null;
-      organizationFilter = null;
+    const scopeResult = await buildProjectListFilter(userId, {
+      organizationId,
+      personal,
+      workspaceId,
+    });
+    if (scopeResult.error) {
+      return res
+        .status(scopeResult.error.status)
+        .json({ message: scopeResult.error.message });
     }
 
-    const scopedProjectIds = await Project.find(
-      organizationId
-        ? { organization: organizationId, "members.user": userId }
-        : personal === "true"
-          ? { organization: null, "members.user": userId }
-          : { "members.user": userId }
-    ).distinct("_id");
+    const scopedProjectIds = await Project.find(scopeResult.filter).distinct(
+      "_id"
+    );
+
+    const projectFilter = {
+      ...scopeResult.filter,
+      isDeleted: true,
+    };
 
     const taskFilter = {
       isDeleted: true,
       project: { $in: scopedProjectIds },
     };
 
-    // Tasks (deleted or not) that are carrying at least one deleted
-    // subtask — a subtask can end up in trash either deleted directly, or
-    // cascaded when its still-active parent task was deleted.
     const subtaskTaskFilter = {
       project: { $in: scopedProjectIds },
       "deletedSubtasks.0": { $exists: true },
@@ -102,7 +95,7 @@ const getTrash = async (req, res) => {
       subtaskTaskFilter.organization = null;
     }
 
-    const [projects, tasks, organizations, tasksWithDeletedSubtasks] = await Promise.all([
+    const [projects, tasks, tasksWithDeletedSubtasks, folders] = await Promise.all([
       Project.find(projectFilter)
         .populate("organization", "name slug isDeleted")
         .populate("owner", "username email")
@@ -112,15 +105,28 @@ const getTrash = async (req, res) => {
         .populate("assignee", "username email")
         .populate("createdBy", "username email")
         .sort({ deletedAt: -1 }),
-      organizationFilter
-        ? Organization.find(organizationFilter)
-            .populate("owner", "username email")
-            .sort({ deletedAt: -1 })
-        : Promise.resolve([]),
       Task.find(subtaskTaskFilter)
         .select("title isDeleted project subtasks deletedSubtasks")
         .populate("deletedSubtasks.deletedBy", "username email")
         .populate("deletedSubtasks.assignees", "username email"),
+      (async () => {
+        try {
+          const scope = await resolveContainerWorkspace(userId, {
+            organizationId,
+            personal,
+            workspaceId,
+          });
+          return Folder.find({
+            workspace: scope.workspaceId,
+            isDeleted: true,
+          })
+            .populate("parentFolder", "name isDeleted")
+            .populate("parentProject", "title isDeleted")
+            .sort({ deletedAt: -1 });
+        } catch {
+          return [];
+        }
+      })(),
     ]);
 
     const subtasks = tasksWithDeletedSubtasks
@@ -174,7 +180,7 @@ const getTrash = async (req, res) => {
       )
       .sort((a, b) => new Date(b.deletedAt) - new Date(a.deletedAt));
 
-    res.json({ projects, tasks, organizations, subtasks });
+    res.json({ projects, tasks, subtasks, folders });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -196,19 +202,19 @@ const restoreProject = async (req, res) => {
       });
     }
 
-    if (project.organization) {
-      const organization = await Organization.findById(project.organization);
-      if (organization?.isDeleted) {
-        return res.status(409).json({
-          message:
-            "The parent organization is still in trash. Restore the organization first, then this project.",
-        });
-      }
-    }
-
     // Restore Project
     project.isDeleted = false;
     project.deletedAt = null;
+
+    if (project.folder) {
+      const folder = await Folder.findOne({
+        _id: project.folder,
+        isDeleted: { $ne: true },
+      });
+      if (!folder) {
+        project.folder = null;
+      }
+    }
 
     await project.save();
 
@@ -616,15 +622,111 @@ const permanentlyDeleteOrganization = async (req, res) => {
   }
 };
 
+const restoreFolder = async (req, res) => {
+  try {
+    if (!isValidId(req.params.folderId)) {
+      return res.status(400).json({ message: "Invalid folder" });
+    }
+
+    const folder = await Folder.findOne({
+      _id: req.params.folderId,
+      isDeleted: true,
+    });
+    if (!folder) {
+      return res.status(404).json({ message: "Deleted folder not found" });
+    }
+
+    const scope = await resolveContainerWorkspace(req.user._id, {
+      workspaceId: folder.workspace,
+      organizationId: folder.organization,
+    });
+    await assertCanCreateInOrg(scope.organizationId, req.user._id);
+
+    if (folder.parentFolder) {
+      const parent = await Folder.findOne({
+        _id: folder.parentFolder,
+        isDeleted: { $ne: true },
+      });
+      if (!parent) {
+        return res.status(409).json({
+          message:
+            "The parent folder is still in trash. Restore the parent folder first.",
+        });
+      }
+    }
+
+    if (folder.parentProject) {
+      const parentProject = await Project.findOne({
+        _id: folder.parentProject,
+        isDeleted: { $ne: true },
+      });
+      if (!parentProject) {
+        return res.status(409).json({
+          message:
+            "The parent project is still in trash. Restore the parent project first.",
+        });
+      }
+    }
+
+    folder.isDeleted = false;
+    folder.deletedAt = null;
+    await folder.save();
+
+    res.json({ message: "Folder restored successfully" });
+  } catch (error) {
+    if (error.status) {
+      return res.status(error.status).json({ message: error.message });
+    }
+    res.status(500).json({ message: error.message });
+  }
+};
+
+const permanentlyDeleteFolder = async (req, res) => {
+  try {
+    if (!isValidId(req.params.folderId)) {
+      return res.status(400).json({ message: "Invalid folder" });
+    }
+
+    const folder = await Folder.findOne({
+      _id: req.params.folderId,
+      isDeleted: true,
+    });
+    if (!folder) {
+      return res.status(404).json({ message: "Deleted folder not found" });
+    }
+
+    const scope = await resolveContainerWorkspace(req.user._id, {
+      workspaceId: folder.workspace,
+      organizationId: folder.organization,
+    });
+    await assertCanCreateInOrg(scope.organizationId, req.user._id);
+
+    const folderIds = await collectDescendantFolderIds([folder._id]);
+    await Folder.deleteMany({
+      _id: { $in: folderIds },
+      isDeleted: true,
+    });
+
+    res.json({ message: "Folder permanently deleted" });
+  } catch (error) {
+    if (error.status) {
+      return res.status(error.status).json({ message: error.message });
+    }
+    res.status(500).json({ message: error.message });
+  }
+};
+
 module.exports = {
   getTrash,
   restoreProject,
   restoreTask,
   restoreOrganization,
   restoreSubtask,
+  restoreFolder,
   permanentlyDeleteProject,
   permanentlyDeleteTask,
   permanentlyDeleteOrganization,
   permanentlyDeleteSubtask,
+  permanentlyDeleteFolder,
   notDeleted,
 };

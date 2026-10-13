@@ -11,6 +11,10 @@ module.exports = {
 
   COMMENT_ADDED: "comment-added",
 
+  // ── presence ─────────────────────────────────────────────────────────────
+  PRESENCE_HEARTBEAT: "presence:heartbeat",
+  PRESENCE_UPDATE: "presence:update",
+
   // ── meetings ─────────────────────────────────────────────────────────────
   MEETING_JOIN: "meeting:join",
   MEETING_LEAVE: "meeting:leave",

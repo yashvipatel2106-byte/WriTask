@@ -5,22 +5,75 @@ import Navbar from "@/components/navbar/Navbar";
 import PermissionGate from "@/components/auth/PermissionGate";
 import { useOrganization } from "@/components/context/organizationContext";
 import { authFetch } from "@/lib/validation/authFetch";
-import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { readStoredWorkspaceId } from "@/lib/workspaceStorage";
+import { useRouter, useSearchParams } from "next/navigation";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { ArrowLeft, FolderPlus } from "lucide-react";
+import ProjectScheduleBudgetFields, {
+  DEFAULT_PROJECT_SCHEDULE_BUDGET,
+  type ProjectScheduleBudgetValues,
+} from "@/components/projects/ProjectScheduleBudgetFields";
+import {
+  buildProjectScheduleBudgetPayload,
+  validateProjectScheduleBudget,
+} from "@/lib/projectScheduleBudget";
 
 export default function CreateProject() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const { currentOrg } = useOrganization();
   const [form, setForm] = useState({ title: "", description: "" });
+  const [scheduleBudget, setScheduleBudget] =
+    useState<ProjectScheduleBudgetValues>(DEFAULT_PROJECT_SCHEDULE_BUDGET);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [parentTitle, setParentTitle] = useState("");
+
+  const folderId = searchParams.get("folderId") || undefined;
+  const fileId = searchParams.get("fileId") || undefined;
+  const parentProjectId = searchParams.get("parentProjectId") || undefined;
+
+  const placementLabel = useMemo(() => {
+    if (parentProjectId) {
+      return parentTitle
+        ? `Creating a subproject inside ${parentTitle}`
+        : "Creating a subproject";
+    }
+    if (folderId) return "Creating a project inside a folder";
+    if (fileId) return "Creating a project inside a file";
+    return currentOrg
+      ? `Creating in organization: ${currentOrg.name}`
+      : "Creating in your personal workspace";
+  }, [currentOrg, folderId, fileId, parentProjectId, parentTitle]);
+
+  useEffect(() => {
+    if (!parentProjectId) {
+      setParentTitle("");
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      const res = await authFetch(`/projects/${parentProjectId}`);
+      if (!res.ok || cancelled) return;
+      const data = await res.json();
+      if (!cancelled) setParentTitle(data.title || "");
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [parentProjectId]);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!form.title.trim()) {
       setError("Project title is required");
+      return;
+    }
+
+    const scheduleError = validateProjectScheduleBudget(scheduleBudget);
+    if (scheduleError) {
+      setError(scheduleError);
       return;
     }
 
@@ -32,6 +85,11 @@ export default function CreateProject() {
         title: form.title.trim(),
         description: form.description.trim(),
         organizationId: currentOrg?.organizationId || undefined,
+        workspaceId: readStoredWorkspaceId() || undefined,
+        ...(parentProjectId
+          ? { parentProjectId }
+          : { folderId, fileId }),
+        ...buildProjectScheduleBudgetPayload(scheduleBudget),
       }),
     });
     const data = await res.json();
@@ -70,12 +128,12 @@ export default function CreateProject() {
               <div className="w-10 h-10 rounded-xl bg-cyan-50 border border-cyan-200 flex items-center justify-center shrink-0 dark:bg-cyan-400/10 dark:border-cyan-400/20">
                 <FolderPlus size={18} className="text-cyan-600 dark:text-cyan-400" />
               </div>
-              <h1 className="text-3xl font-bold text-slate-900 dark:text-slate-100">Create Project</h1>
+              <h1 className="text-3xl font-bold text-slate-900 dark:text-slate-100">
+                {parentProjectId ? "Create Subproject" : "Create Project"}
+              </h1>
             </div>
             <p className="text-slate-500 text-sm mb-8 dark:text-slate-400">
-              {currentOrg
-                ? `Creating in organization: ${currentOrg.name}`
-                : "Creating in your personal workspace"}
+              {placementLabel}
             </p>
 
             <form
@@ -116,6 +174,13 @@ export default function CreateProject() {
                 />
               </div>
 
+              <ProjectScheduleBudgetFields
+                values={scheduleBudget}
+                onChange={(next) =>
+                  setScheduleBudget((prev) => ({ ...prev, ...next }))
+                }
+              />
+
               <div className="flex flex-wrap justify-end gap-3 pt-2">
                 <button
                   type="button"
@@ -129,7 +194,11 @@ export default function CreateProject() {
                   disabled={loading || !form.title.trim()}
                   className="bg-gradient-to-r bg-cyan-600  text-white px-6 py-3 rounded-xl font-medium disabled:opacity-60 hover:bg-cyan-700  transition-opacity"
                 >
-                  {loading ? "Creating..." : "Create Project"}
+                  {loading
+                    ? "Creating..."
+                    : parentProjectId
+                    ? "Create Subproject"
+                    : "Create Project"}
                 </button>
               </div>
             </form>

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import Navbar from "@/components/navbar/Navbar";
 import Sidebar from "@/components/sidebar/sidebar";
 import { useOrganization } from "@/components/context/organizationContext";
@@ -17,7 +18,7 @@ import {
   type RoleDefinition,
 } from "@/lib/rbac";
 import { PermissionGroup } from "@/components/rbac/PermissionEditor";
-import { Plus, Save, Trash2, RefreshCw } from "lucide-react";
+import { ArrowLeft, Plus, Save, Trash2, RefreshCw } from "lucide-react";
 
 export default function AdminPage() {
   const router = useRouter();
@@ -75,10 +76,19 @@ export default function AdminPage() {
   }, [router, canViewAdmin, loadData]);
 
   useEffect(() => {
-    if (!selectedRole) return;
-    setDraftOrgPerms(selectedRole.orgPermissions || []);
+  if (!selectedRole) return;
+
+  setDraftOrgPerms(selectedRole.orgPermissions || []);
+
+  // Owner should have every project/task permission enabled by default
+  if (selectedRole.id === "owner") {
+    setDraftProjectPerms(
+      PROJECT_PERMISSION_ITEMS.map((permission) => permission.key)
+    );
+  } else {
     setDraftProjectPerms(selectedRole.projectPermissions || []);
-  }, [selectedRole]);
+  }
+}, [selectedRole]);
 
   const saveRole = async () => {
     if (!orgId || !selectedRole) return;
@@ -168,6 +178,14 @@ export default function AdminPage() {
         <Sidebar />
         <main className="flex-1 min-h-0 ml-0 lg:ml-70 mt-18 h-[calc(100vh-72px)] overflow-y-auto overscroll-contain bg-[#F6F9FC] px-8 py-7 dark:bg-[#0B1120]">
           <div className="max-w-6xl mx-auto">
+            <Link
+              href="/settings/organization"
+              className="inline-flex items-center gap-2 text-sm text-cyan-700/80 hover:text-cyan-600 mb-6 dark:text-cyan-400/80 dark:hover:text-cyan-300"
+            >
+              <ArrowLeft size={16} />
+              Back to Organization Settings
+            </Link>
+
             <div className="mb-8">
               <h1 className="text-4xl font-bold text-slate-900 dark:text-slate-100">Administration</h1>
               <p className="text-slate-500 mt-2 dark:text-slate-400">

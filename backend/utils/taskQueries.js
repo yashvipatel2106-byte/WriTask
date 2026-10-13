@@ -24,6 +24,20 @@ function isTaskCompleted(status, project = null) {
   return false;
 }
 
+/** 0–100 weight for project progress (completed = 100, review = 80, in-progress = 50). */
+function getTaskProgressWeight(task, project = null) {
+  const status = task?.status || (task?.completed ? COMPLETED_STATUS : "todo");
+  if (task?.completed || isTaskCompleted(status, project)) {
+    return 100;
+  }
+  const normalized = String(status || "").toLowerCase();
+  if (normalized === "review") return 80;
+  if (normalized === "in-progress" || normalized === "in progress") {
+    return 50;
+  }
+  return 0;
+}
+
 function getTaskProjectId(task) {
   if (!task?.project) return null;
   if (typeof task.project === "object" && task.project._id) {
@@ -47,12 +61,14 @@ function openTaskFilter() {
 
 async function getAccessibleProjectIds(
   userId,
-  { organizationId, personal, allOrgProjects } = {}
+  { organizationId, personal, allOrgProjects, workspaceId, trashOnly } = {}
 ) {
   const result = await buildProjectListFilter(userId, {
     organizationId,
     personal,
     allOrgProjects,
+    workspaceId,
+    trashOnly,
   });
 
   if (result.error) {
@@ -87,6 +103,7 @@ module.exports = {
   COMPLETED_STATUSES,
   ACTIVE_TASK_FILTER,
   isTaskCompleted,
+  getTaskProgressWeight,
   getTaskProjectId,
   buildAssignedActiveTaskFilter,
   startOfToday,

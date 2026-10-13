@@ -6,6 +6,14 @@ const crypto = require("crypto");
 const { OAuth2Client } = require("google-auth-library");
 const workerManager = require("../workers/workerManager");
 const { resolveFrontendUrl, normalizeEmail } = require("../utils/frontendUrl");
+const {
+  listUserOrganizations,
+  findMembership,
+  resolvePasswordResetOrganization,
+  resolveLoginOrganization,
+  setOrgMembershipPassword,
+  hashOrgPassword,
+} = require("../utils/orgMembershipAuth");
 
 require("dotenv").config();
 
@@ -16,18 +24,56 @@ const {
     otpFailures,
     activeSessions,
 } = require("../metrics/authMetrics");
-// Shared success shape for both password and Google login, so the frontend
-// handles either the same way.
-async function buildAuthResponse(user) {
-  const token = jwt.sign(
-    { id: user._id },
-    process.env.JWT_SECRET,
-    { expiresIn: "1d" }
-  );
 
-  const org = await Organization.findOne({
-    $or: [{ owner: user._id }, { "members.user": user._id }],
-  });
+const INVALID_CREDENTIALS = "Invalid user ID or password";
+
+function signAuthToken(userId, organizationId = null) {
+  const payload = { id: userId };
+  if (organizationId) payload.organizationId = organizationId.toString();
+  return jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: "1d" });
+}
+
+function escapeRegex(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function mapOrgChoices(organizations, userId) {
+  return organizations.map((org) => ({
+    organizationId: org._id.toString(),
+    name: org.name,
+    slug: org.slug,
+    role: org.getMemberRole(userId),
+  }));
+}
+
+/**
+ * Shared success shape for password, Google, and workspace-switch responses.
+ * By default does NOT auto-select an organization — login/signup land in
+ * Personal Workspace. Pass organizationId explicitly when switching into an org.
+ */
+async function buildAuthResponse(user, organizationId = null) {
+  const orgs = await listUserOrganizations(user._id);
+  let activeOrgId = organizationId ? organizationId.toString() : null;
+
+  if (activeOrgId) {
+    const belongs = orgs.some((o) => o._id.toString() === activeOrgId);
+    if (!belongs) activeOrgId = null;
+  }
+
+  try {
+    const {
+      ensurePersonalWorkspace,
+      ensureOrgBuiltinWorkspaces,
+    } = require("../utils/workspaces");
+    await ensurePersonalWorkspace(user._id);
+    if (activeOrgId) {
+      await ensureOrgBuiltinWorkspaces(activeOrgId, user._id);
+    }
+  } catch (wsErr) {
+    console.error("Workspace ensure on auth failed:", wsErr.message);
+  }
+
+  const token = signAuthToken(user._id, activeOrgId);
 
   return {
     token,
@@ -38,10 +84,34 @@ async function buildAuthResponse(user) {
       systemRole: user.systemRole || "user",
       avatarColor: user.avatarColor || "",
       hasPassword: Boolean(user.password),
+      colorTheme: user.settings?.colorTheme || null,
     },
-    organizationId: org ? org._id.toString() : null,
-    needsOnboarding: !org,
+    organizationId: activeOrgId,
+    workspaceType: activeOrgId ? "organization" : "personal",
+    organizations: mapOrgChoices(orgs, user._id),
+    // Personal workspace is always available; org onboarding is optional in-app.
+    needsOnboarding: false,
   };
+}
+
+async function findUserByLoginId(raw) {
+  const identifier = String(raw || "").trim();
+  if (!identifier) return null;
+
+  const email = normalizeEmail(identifier);
+  if (email && identifier.includes("@")) {
+    return User.findOne({ email });
+  }
+
+  const byUsername = await User.findOne({
+    username: new RegExp(`^${escapeRegex(identifier)}$`, "i"),
+  });
+  if (byUsername) return byUsername;
+
+  if (email) {
+    return User.findOne({ email });
+  }
+  return null;
 }
 
 
@@ -128,6 +198,9 @@ exports.signup = async (req, res) => {
       otpExpiry,
       verified: false,
     });
+
+    // Personal workspace is created on first authenticated ensure/list;
+    // avoid tying it to unverified signup records.
 
     workerManager.run("emailWorker.js", {
     type: "OTP",
@@ -232,73 +305,89 @@ exports.verifyOTP = async (
 };
 
 
-// LOGIN
+// LOGIN — organization password only
+//
+// Body: { userId|username|email, password }
+// Opens the organization whose membership password matches (earliest joinedAt
+// wins when multiple orgs share a password). Personal account passwords are
+// not used for sign-in.
 
-exports.login = async (
-  req,
-  res
-) => {
+exports.login = async (req, res) => {
   loginRequests.inc();
   try {
-    const { email: rawEmail, password } =
-      req.body;
-    const email = normalizeEmail(rawEmail);
+    const loginId =
+      req.body.userId ||
+      req.body.username ||
+      req.body.email ||
+      "";
+    const password = req.body.password;
 
-    const user =
-      await User.findOne({
-        email,
-      });
+    if (!String(loginId).trim()) {
+      failedLogins.inc();
+      return res.status(400).json({ message: INVALID_CREDENTIALS });
+    }
+
+    const user = await findUserByLoginId(loginId);
 
     if (!user) {
       failedLogins.inc();
-      return res.status(404).json({
-        message:
-          "User not found.",
-      });
+      return res.status(401).json({ message: INVALID_CREDENTIALS });
     }
 
     if (!user.verified) {
       return res.status(403).json({
-        message:
-          "Please verify your email first.",
+        message: "Please verify your email first.",
       });
     }
 
-    if (!user.password) {
-      return res.status(400).json({
-        message:
-          "This account uses Google Sign-In. Please continue with Google.",
+    const orgs = await listUserOrganizations(user._id);
+
+    if (!password) {
+      return res.json({
+        needsPassword: true,
+        email: user.email,
+        username: user.username,
+        organizationId: null,
+        workspaceType: orgs.length ? "organization" : "personal",
+        message: orgs.length
+          ? "Enter your organization password to continue."
+          : "Enter your password to continue.",
       });
     }
 
-    const isMatch =
-      await bcrypt.compare(
-        password,
-        user.password
-      );
+    const plainPassword = String(password).trim();
 
-    if (!isMatch) {
-      failedLogins.inc();
-      return res.status(400).json({
-        message:
-          "Invalid Password",
+    if (orgs.length) {
+      const loginOrg = await resolveLoginOrganization(user, plainPassword);
+      if (loginOrg) {
+        const auth = await buildAuthResponse(user, loginOrg._id);
+        activeSessions.inc();
+        return res.json({
+          ...auth,
+          organizationName: loginOrg.name,
+          message: "Login successful",
+        });
+      }
+    }
+
+    // No organization membership password matched (or the user isn't a
+    // member of any organization yet, e.g. a plain signup that hasn't been
+    // invited anywhere) — fall back to the personal account password so
+    // they can still sign in to their Personal Workspace.
+    if (user.password && (await bcrypt.compare(plainPassword, user.password))) {
+      const auth = await buildAuthResponse(user, null);
+      activeSessions.inc();
+      return res.json({
+        ...auth,
+        message: "Login successful",
       });
     }
 
-    const auth = await buildAuthResponse(user);
-    activeSessions.inc();
-    return res.json({ ...auth, message: "Login successful" });
-
+    failedLogins.inc();
+    return res.status(401).json({ message: INVALID_CREDENTIALS });
   } catch (error) {
-    console.error(
-      "Login Error:",
-      error
-    );
-
-    return res.status(500).json({
-      message:
-        "Internal Server Error",
-    });
+    console.error("Login Error:", error);
+    return res.status(500).json({ message: "Internal Server Error" });
   }
 };
 
@@ -369,7 +458,7 @@ exports.googleLogin = async (req, res) => {
       await user.save();
     }
 
-    const auth = await buildAuthResponse(user);
+    const auth = await buildAuthResponse(user, null);
     return res.json({ ...auth, message: "Login successful" });
   } catch (error) {
     console.error("Google Login Error:", error);
@@ -379,11 +468,14 @@ exports.googleLogin = async (req, res) => {
 
 
 // FORGOT PASSWORD
+// Keeps the existing email + reset-link flow. The token is bound server-side to
+// a specific organization membership when one can be resolved (optional
+// organizationId in the body is only accepted after membership validation).
 
 exports.forgotPassword =
   async (req, res) => {
     try {
-      const { email: rawEmail } =
+      const { email: rawEmail, organizationId: requestedOrgId } =
         req.body;
       const email = normalizeEmail(rawEmail);
 
@@ -401,6 +493,11 @@ exports.forgotPassword =
           });
       }
 
+      const targetOrg = await resolvePasswordResetOrganization(
+        user._id,
+        requestedOrgId || null
+      );
+
       const token =
         crypto
           .randomBytes(32)
@@ -415,6 +512,8 @@ exports.forgotPassword =
         Date.now() +
         3600000;
 
+      user.resetOrganizationId = targetOrg ? targetOrg._id : null;
+
       await user.save();
 
       const frontendUrl = resolveFrontendUrl(req);
@@ -425,14 +524,18 @@ exports.forgotPassword =
     data: {
         email,
         resetLink,
+        organizationName: targetOrg ? targetOrg.name : null,
     },
 }).catch((err) => {
     console.error("Forgot Password Worker Error:", err);
 });
 
       return res.json({
-        message:
-          "Password reset email sent",
+        message: targetOrg
+          ? `Password reset email sent for ${targetOrg.name}`
+          : "Password reset email sent",
+        organizationId: targetOrg ? targetOrg._id.toString() : null,
+        organizationName: targetOrg ? targetOrg.name : null,
       });
     } catch (error) {
       console.error(
@@ -449,6 +552,8 @@ exports.forgotPassword =
 
 
 // RESET PASSWORD
+// Uses the organization bound to the token at forgot-password time — never an
+// organizationId from the reset request body.
 
 exports.resetPassword =
   async (req, res) => {
@@ -457,6 +562,12 @@ exports.resetPassword =
         token,
         password,
       } = req.body;
+
+      if (!password || String(password).length < 6) {
+        return res.status(400).json({
+          message: "Password must be at least 6 characters",
+        });
+      }
 
       const user =
         await User.findOne({
@@ -478,11 +589,38 @@ exports.resetPassword =
           });
       }
 
-      user.password =
-        await bcrypt.hash(
-          password,
-          10
+      const boundOrgId = user.resetOrganizationId
+        ? user.resetOrganizationId.toString()
+        : null;
+
+      let organizationName = null;
+
+      if (boundOrgId) {
+        const organization = await Organization.findOne({
+          _id: boundOrgId,
+          isDeleted: { $ne: true },
+        });
+        if (!organization || !findMembership(organization, user._id)) {
+          user.resetToken = undefined;
+          user.resetTokenExpiry = undefined;
+          user.resetOrganizationId = undefined;
+          await user.save();
+          return res.status(400).json({
+            message: "Invalid or expired token",
+          });
+        }
+
+        organizationName = organization.name;
+        await setOrgMembershipPassword(
+          organization,
+          user._id,
+          String(password).trim()
         );
+      } else {
+        // No organization was bound to this token (personal workspace, or
+        // multi-org forgot without a membership-validated organizationId).
+        user.password = await hashOrgPassword(String(password).trim());
+      }
 
       user.resetToken =
         undefined;
@@ -490,11 +628,15 @@ exports.resetPassword =
       user.resetTokenExpiry =
         undefined;
 
+      user.resetOrganizationId = undefined;
+
       await user.save();
 
       return res.json({
-        message:
-          "Password Updated",
+        message: organizationName
+          ? `Password updated for ${organizationName}`
+          : "Password Updated",
+        organizationName,
       });
     } catch (error) {
       console.error(
@@ -508,3 +650,17 @@ exports.resetPassword =
       });
     }
   };
+
+// Switch active session back to Personal Workspace (clears JWT organizationId).
+exports.switchToPersonal = async (req, res) => {
+  try {
+    const auth = await buildAuthResponse(req.user, null);
+    return res.json({
+      ...auth,
+      message: "Switched to Personal Workspace",
+    });
+  } catch (error) {
+    console.error("Switch Personal Error:", error);
+    return res.status(500).json({ message: "Internal Server Error" });
+  }
+};

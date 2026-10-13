@@ -1,5 +1,6 @@
 const EVENTS = require("./events");
 const { registerMeetingHandlers } = require("./meetingHandler");
+const { registerPresenceHandlers } = require("./presenceHandler");
 
 const registerSocketHandlers = (io) => {
   io.on("connection", (socket) => {
@@ -16,6 +17,7 @@ const registerSocketHandlers = (io) => {
     });
 
     registerMeetingHandlers(io, socket);
+    registerPresenceHandlers(io, socket);
 
     socket.on("disconnect", () => {
       console.log("Disconnected :", socket.id);

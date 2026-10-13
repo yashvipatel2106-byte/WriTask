@@ -6,7 +6,7 @@ import {
   toDateKey,
   type DependencyType,
   type TaskDependency,
-} from "./taskDependencies.ts";
+} from "./taskDependencies";
 
 export type CriticalPathTask = {
   _id: string;

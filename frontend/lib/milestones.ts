@@ -1,4 +1,4 @@
-import { toDateKey } from "./taskDependencies.ts";
+import { toDateKey } from "./taskDependencies";
 
 export type MilestoneStatus = "pending" | "in-progress" | "completed";
 

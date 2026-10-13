@@ -1,13 +1,13 @@
 /**
  * Normalize API base — always ends with /api.
  *
- * Local: NEXT_PUBLIC_API_URL or http://localhost:5000/api
+ * Local: API_URL or http://localhost:5000/api
  * Dev Tunnel: if the page is on *-3000.*.devtunnels.ms, call *-5000.*.devtunnels.ms
  * so other devices don't hit their own localhost.
  */
 export function getApiBaseUrl(): string {
   let base =
-    process.env.NEXT_PUBLIC_API_URL?.trim() || "http://localhost:5000/api";
+    process.env.API_URL?.trim() || "http://localhost:5000/api";
 
   if (typeof window !== "undefined") {
     const match = window.location.hostname.match(

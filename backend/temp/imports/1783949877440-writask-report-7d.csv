@@ -1,0 +1,18 @@
+Metric,Value
+Period,7d
+Total Projects,2
+Total Tasks,10
+Completed Tasks,3
+Pending Tasks,7
+Completion Rate,30%
+Overdue Tasks,3
+Total Members,4
+
+Project,Progress,Tasks,Done,Status
+Project@2,33%,3,1,At Risk
+task managment,29%,7,2,Delayed
+
+Member,Completed,Pending,Overdue,Efficiency
+yashvi,1,0,1,50%
+tirth,1,0,0,100%
+Dhvani,0,0,1,0%

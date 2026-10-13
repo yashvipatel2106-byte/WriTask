@@ -1,0 +1,5 @@
+Task Name,Description,Assignee Email,Status,Start Date,Due Date,Estimated Hours,Parent Task
+Design homepage,Create the landing page layout,member@example.com,To Do,2026-07-14,2026-07-21,8,
+Build login API,Create the sign-in endpoint,"member@example.com, teammate@example.com",In Progress,2026-07-15,2026-07-22,12,
+Configure authentication,Add JWT middleware,member@example.com,Review,2026-07-16,2026-07-22,4,Build login API
+Invalid example,This row is intentionally skipped,,Done,2026-07-17,2026-07-18,2,

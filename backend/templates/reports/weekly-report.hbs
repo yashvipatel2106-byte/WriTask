@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8" />
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: "Segoe UI", Arial, sans-serif;
+    color: #1e293b;
+    padding: 28px 34px;
+    font-size: 12px;
+    line-height: 1.4;
+  }
+  h1, h2, h3 { margin: 0; }
+  .header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    border-bottom: 3px solid #06b6d4;
+    padding-bottom: 16px;
+    margin-bottom: 20px;
+  }
+  .header-brand { display: flex; align-items: center; gap: 12px; }
+  .header-brand img { width: 44px; height: 44px; object-fit: contain; }
+  .header-brand .title { font-size: 22px; font-weight: 800; color: #0f172a; letter-spacing: -0.01em; }
+  .header-brand .subtitle { font-size: 12px; color: #64748b; margin-top: 2px; }
+  .header-brand .org-badge {
+    display: inline-block;
+    margin-top: 6px;
+    padding: 3px 10px;
+    background: #ecfeff;
+    color: #0e7490;
+    border: 1px solid #a5f3fc;
+    border-radius: 999px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+  }
+  .header-meta { text-align: right; font-size: 11px; color: #64748b; }
+  .header-meta .week-range {
+    font-size: 13px;
+    font-weight: 600;
+    color: #06b6d4;
+    margin-bottom: 3px;
+  }
+
+  .card {
+    border: 1px solid #e2e8f0;
+    padding: 16px 18px;
+    margin-bottom: 16px;
+    border-radius: 10px;
+    page-break-inside: avoid;
+  }
+
+  .employee-card { display: flex; align-items: center; justify-content: space-between; }
+  .employee-name { font-size: 15px; font-weight: 700; color: #0f172a; }
+  .employee-meta { color: #64748b; font-size: 11px; margin-top: 2px; }
+  .employee-org { margin-left: auto; text-align: right; font-size: 11px; color: #64748b; }
+  .employee-org .org-name { font-weight: 600; color: #334155; font-size: 12px; }
+
+  .kpi-grid {
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    gap: 10px;
+    margin-bottom: 16px;
+  }
+  .kpi-card {
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    padding: 10px 8px;
+    text-align: center;
+    page-break-inside: avoid;
+  }
+  .kpi-value { font-size: 18px; font-weight: 700; color: #0f172a; }
+  .kpi-label { font-size: 9px; color: #64748b; text-transform: uppercase; letter-spacing: 0.03em; margin-top: 2px; }
+
+  .section-title {
+    font-size: 13px;
+    font-weight: 700;
+    color: #0f172a;
+    margin-bottom: 10px;
+  }
+
+  .dist-row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+  .dist-label { width: 90px; font-size: 11px; color: #475569; flex-shrink: 0; }
+  .dist-bar-track { flex: 1; background: #f1f5f9; border-radius: 6px; height: 10px; overflow: hidden; }
+  .dist-bar-fill { height: 100%; border-radius: 6px; }
+  .dist-count { width: 26px; text-align: right; font-size: 11px; font-weight: 600; color: #334155; flex-shrink: 0; }
+
+  table { width: 100%; border-collapse: collapse; }
+  thead th {
+    text-align: left;
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: #94a3b8;
+    border-bottom: 1px solid #e2e8f0;
+    padding: 6px 8px;
+  }
+  tbody td {
+    padding: 7px 8px;
+    border-bottom: 1px solid #f1f5f9;
+    font-size: 11px;
+    color: #334155;
+  }
+  tbody tr:last-child td { border-bottom: none; }
+
+  .progress-track { background: #e2e8f0; border-radius: 6px; height: 8px; width: 72px; display: inline-block; vertical-align: middle; overflow: hidden; }
+  .progress-fill { height: 100%; border-radius: 6px; display: block; min-width: 0; }
+  .progress-pct { font-size: 10px; color: #64748b; margin-left: 6px; font-weight: 600; }
+
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 6px; font-size: 10px; font-weight: 600; }
+  .badge-high { background: #fee2e2; color: #b91c1c; }
+  .badge-medium { background: #fef3c7; color: #92400e; }
+  .badge-low { background: #d1fae5; color: #047857; }
+
+  .activity-bars { display: flex; gap: 4px; align-items: flex-end; height: 14px; }
+  .activity-bar { width: 5px; border-radius: 2px; }
+  .activity-bar.completed { background: #06b6d4; }
+  .activity-bar.created { background: #a78bfa; }
+
+  .empty-state { color: #94a3b8; font-size: 11px; text-align: center; padding: 14px 0; }
+
+  .footer {
+    margin-top: 24px;
+    padding-top: 12px;
+    border-top: 1px solid #e2e8f0;
+    display: flex;
+    justify-content: space-between;
+    font-size: 10px;
+    color: #94a3b8;
+  }
+</style>
+</head>
+<body>
+
+  <div class="header">
+    <div class="header-brand">
+      {{#if logoDataUri}}<img src="{{logoDataUri}}" alt="WriTask" />{{/if}}
+      <div>
+        <div class="title">WriTask</div>
+        <div class="subtitle">Weekly Performance Report</div>
+        <div class="org-badge">{{organizationSummary}}</div>
+      </div>
+    </div>
+    <div class="header-meta">
+      <div class="week-range">{{weekRangeLabel}}</div>
+      <div>Generated {{generatedAt}}</div>
+    </div>
+  </div>
+
+  <div class="card employee-card">
+    <div>
+      <div class="employee-name">{{employee.username}}</div>
+      <div class="employee-meta">
+        {{employee.email}}
+        {{#if employee.designation}} &middot; {{employee.designation}}{{/if}}
+        {{#if employee.department}} &middot; {{employee.department}}{{/if}}
+      </div>
+    </div>
+    <div class="employee-org">
+      <div class="org-name">{{organizationSummary}}</div>
+      <div>Workspace</div>
+    </div>
+  </div>
+
+  <div class="kpi-grid">
+    <div class="kpi-card">
+      <div class="kpi-value">{{summary.totalProjects}}</div>
+      <div class="kpi-label">Projects</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-value">{{summary.assigned}}</div>
+      <div class="kpi-label">Assigned</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-value">{{summary.completed}}</div>
+      <div class="kpi-label">Completed</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-value">{{summary.pending}}</div>
+      <div class="kpi-label">Pending</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-value">{{summary.overdue}}</div>
+      <div class="kpi-label">Overdue</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-value">{{summary.completionRate}}%</div>
+      <div class="kpi-label">Completion</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="section-title">Task Distribution</div>
+    {{#each distributionChart}}
+    <div class="dist-row">
+      <div class="dist-label">{{this.label}}</div>
+      <div class="dist-bar-track">
+        <div class="dist-bar-fill" style="width:{{this.pct}}%;background:{{this.color}};"></div>
+      </div>
+      <div class="dist-count">{{this.count}}</div>
+    </div>
+    {{/each}}
+  </div>
+
+  <div class="card">
+    <div class="section-title">Weekly Activity</div>
+    <table>
+      <thead>
+        <tr>
+          <th>Day</th>
+          <th>Created</th>
+          <th>Completed</th>
+          <th>Trend</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{#each activityChart}}
+        <tr>
+          <td>{{this.day}}</td>
+          <td>{{this.created}}</td>
+          <td>{{this.completed}}</td>
+          <td>
+            <div class="activity-bars">
+              <div class="activity-bar created" style="height:{{this.createdPct}}%;min-height:2px;"></div>
+              <div class="activity-bar completed" style="height:{{this.completedPct}}%;min-height:2px;"></div>
+            </div>
+          </td>
+        </tr>
+        {{/each}}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <div class="section-title">Project Performance</div>
+    {{#if hasProjects}}
+    <table>
+      <thead>
+        <tr>
+          <th>Project</th>
+          <th>Manager</th>
+          <th>Assigned</th>
+          <th>Completed</th>
+          <th>Pending</th>
+          <th>Progress</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{#each projectPerformance}}
+        <tr>
+          <td>{{this.projectName}}</td>
+          <td>{{#if this.manager}}{{this.manager.username}}{{else}}Unassigned{{/if}}</td>
+          <td>{{this.assigned}}</td>
+          <td>{{this.completed}}</td>
+          <td>{{this.pending}}</td>
+          <td>
+            <span class="progress-track"><span class="progress-fill" style="width:{{this.progress}}%;background-color:{{this.progressColor}};"></span></span>
+            <span class="progress-pct">{{this.progress}}%</span>
+          </td>
+        </tr>
+        {{/each}}
+      </tbody>
+    </table>
+    {{else}}
+    <div class="empty-state">No active projects this week.</div>
+    {{/if}}
+  </div>
+
+  <div class="card">
+    <div class="section-title">Recent Tasks</div>
+    {{#if hasRecentTasks}}
+    <table>
+      <thead>
+        <tr>
+          <th>Task</th>
+          <th>Project</th>
+          <th>Status</th>
+          <th>Priority</th>
+          <th>Due</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{#each recentTasksFormatted}}
+        <tr>
+          <td>{{this.title}}</td>
+          <td>{{this.project}}</td>
+          <td>{{this.status}}</td>
+          <td>
+            <span class="badge badge-{{this.priority}}">{{this.priority}}</span>
+          </td>
+          <td>{{this.dueDateFormatted}}</td>
+        </tr>
+        {{/each}}
+      </tbody>
+    </table>
+    {{else}}
+    <div class="empty-state">No recent task activity.</div>
+    {{/if}}
+  </div>
+
+  <div class="footer">
+    <div>WriTask &middot; Automated Weekly Report</div>
+    <div>Generated {{generatedAt}}</div>
+  </div>
+
+</body>
+</html>

@@ -1,0 +1,27 @@
+Metric,Value
+Report,Personal
+Scope,All my projects
+Period,30d
+Projects,1
+Total Tasks,3
+Completed,0
+Pending,3
+Overdue,0
+Completion Rate,0%
+
+Day,Date,Completed,Pending
+Fri,2026-07-03,0,0
+Sat,2026-07-04,0,0
+Sun,2026-07-05,0,0
+Mon,2026-07-06,0,0
+Tue,2026-07-07,0,0
+Wed,2026-07-08,0,0
+Thu,2026-07-09,0,3
+
+Project,Workspace,Progress,Tasks,Done,Status
+Task Management System,Kaushalam,0%,3,0,At Risk
+
+Task,Project,Status,Priority,Due Date
+7,Task Management System,task-done,medium,7/30/2026
+6,Task Management System,review,medium,7/27/2026
+12,Task Management System,in-progress,medium,8/21/2026

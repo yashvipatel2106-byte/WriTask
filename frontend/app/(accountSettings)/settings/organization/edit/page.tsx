@@ -47,7 +47,7 @@ export default function EditOrganizationPage() {
     setSavingHours(true);
     try {
       const res = await authFetch(
-        `/organizations/${currentOrg.organizationId}/work-hours`,
+        `/organizations/${currentOrg?.organizationId}/work-hours`,
         {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
@@ -84,13 +84,13 @@ export default function EditOrganizationPage() {
     );
   }
 
-  const canDelete = currentOrg.role === "owner";
+  const canDelete = currentOrg?.role === "owner";
 
   const handleDelete = async () => {
     setDeleting(true);
     await confirmAndDeleteOrganization({
-      organizationId: currentOrg.organizationId,
-      name: currentOrg.name,
+      organizationId: currentOrg?.organizationId,
+      name: currentOrg?.name,
       onError: (msg) => toast.error(msg),
       onSuccess: async () => {
         try {
@@ -110,7 +110,7 @@ export default function EditOrganizationPage() {
         toast.success("Organization deleted");
         const remaining =
           access?.organizations.filter(
-            (o) => o.organizationId !== currentOrg.organizationId
+            (o) => o.organizationId !== currentOrg?.organizationId
           ) || [];
         router.push(
           remaining.length ? "/dashboard" : "/settings/create-organization"
@@ -127,7 +127,7 @@ export default function EditOrganizationPage() {
         <p className="text-slate-500 dark:text-slate-400">
           Update the name, logo, and daily work hours for{" "}
           <span className="font-medium text-slate-700 dark:text-slate-200">
-            {currentOrg.name}
+            {currentOrg?.name}
           </span>
           , or permanently delete the organization.
         </p>
@@ -200,7 +200,7 @@ export default function EditOrganizationPage() {
           </h2>
           <p className="mt-2 text-sm text-red-800/80 dark:text-red-300/80">
             Permanently delete{" "}
-            <span className="font-medium">{currentOrg.name}</span>. Projects and
+            <span className="font-medium">{currentOrg?.name}</span>. Projects and
             tasks belonging to it will be removed. User accounts are preserved.
             This cannot be undone.
           </p>
@@ -226,11 +226,11 @@ export default function EditOrganizationPage() {
 
       {showEdit && (
         <EditOrganizationDialog
-          orgId={currentOrg.organizationId}
-          name={currentOrg.name}
+          orgId={currentOrg?.organizationId}
+          name={currentOrg?.name}
           description=""
-          hasLogo={Boolean(currentOrg.hasLogo)}
-          logoUpdatedAt={currentOrg.logoUpdatedAt || null}
+          hasLogo={Boolean(currentOrg?.hasLogo)}
+          logoUpdatedAt={currentOrg?.logoUpdatedAt || null}
           onClose={() => setShowEdit(false)}
           onSaved={async () => {
             setShowEdit(false);

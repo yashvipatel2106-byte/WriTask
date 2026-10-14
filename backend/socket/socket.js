@@ -35,10 +35,11 @@ const attachSocketAuth = (socket, next) => {
 };
 
 const initializeSocket = (server) => {
-  // Reflect request origin so local + Dev Tunnel frontends both work
+  // CORS_ORIGINS allow-list; reflects the request origin when unset
+  // so local + Dev Tunnel frontends keep working.
   io = new Server(server, {
     cors: {
-      origin: true,
+      origin: require("../config/corsOrigins").corsOriginOption(),
       methods: ["GET", "POST", "PUT", "DELETE"],
       credentials: true,
     },

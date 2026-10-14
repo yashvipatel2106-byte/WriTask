@@ -2,6 +2,8 @@ const path = require('node:path');
 const express = require('express');
 const http = require('http');
 const cors = require('cors');
+const helmet = require('helmet');
+const { corsOriginOption } = require('./corsOrigins');
 const dotenv = require('dotenv');
 const connectDB = require('./db');
 const authRoutes = require('../routes/authRoutes');
@@ -55,16 +57,45 @@ initializeSocket(server);
 
 
 
-app.use(cors({ origin: "*", credentials: true }));
+// Fail fast when required secrets are missing.
+const missingEnv = ['JWT_SECRET', 'MONGO_URI'].filter((k) => !process.env[k]);
+if (missingEnv.length) {
+  console.error(`Missing required environment variables: ${missingEnv.join(', ')}`);
+  if (!process.env.VERCEL) process.exit(1);
+}
+
+const isProduction = process.env.NODE_ENV === 'production';
+
+// Needed so rate limiting sees the real client IP behind a proxy / Vercel.
+app.set('trust proxy', 1);
+app.use(
+  helmet({
+    // Swagger UI needs inline scripts; uploads are loaded cross-origin.
+    contentSecurityPolicy: false,
+    crossOriginResourcePolicy: { policy: 'cross-origin' },
+  })
+);
+app.use(cors({ origin: corsOriginOption(), credentials: true }));
 app.use(express.json());
+app.use(require('../middleware/sanitizeServerErrors'));
 
-app.get(['/metrics', '/api/metrics'], getMetricsRequestHandler);
+// Prometheus metrics: in production require METRICS_TOKEN (Bearer); disabled if unset.
+const metricsGuard = (req, res, next) => {
+  if (!isProduction) return next();
+  const token = process.env.METRICS_TOKEN;
+  if (!token) return res.status(404).end();
+  if (req.get('authorization') !== `Bearer ${token}`) return res.status(401).end();
+  next();
+};
+app.get(['/metrics', '/api/metrics'], metricsGuard, getMetricsRequestHandler);
 
-// Swagger / OpenAPI docs
-const swaggerUi = require("swagger-ui-express");
-const { swaggerSpec, swaggerUiOptions } = require("./swagger");
-app.get("/api/docs.json", (_req, res) => res.json(swaggerSpec));
-app.use("/api/docs", swaggerUi.serve, swaggerUi.setup(swaggerSpec, swaggerUiOptions));
+// Swagger / OpenAPI docs: hidden in production unless ENABLE_API_DOCS=true
+if (!isProduction || process.env.ENABLE_API_DOCS === 'true') {
+  const swaggerUi = require("swagger-ui-express");
+  const { swaggerSpec, swaggerUiOptions } = require("./swagger");
+  app.get("/api/docs.json", (_req, res) => res.json(swaggerSpec));
+  app.use("/api/docs", swaggerUi.serve, swaggerUi.setup(swaggerSpec, swaggerUiOptions));
+}
 
 // Log requests only in development
 if (process.env.NODE_ENV !== "production") {
@@ -94,7 +125,8 @@ app.use("/api/meetings", require("../routes/meetingRoutes"));
 app.use("/api/trash", trashRoutes);
 app.use("/api/search", searchRoutes);
 app.use("/api/workload", workloadRoutes);
-app.use('/api/test', require('../routes/testRoutes')); 
+// Dev-only email test endpoint (never mounted in production).
+if (!isProduction) app.use('/api/test', authMiddleware, require('../routes/testRoutes'));
 app.use("/api/reports", reportRoutes); // Mount report routes under /api/reports
 app.use("/api/contact", contactRoutes);
 app.use("/api/custom-fields", customFieldRoutes);

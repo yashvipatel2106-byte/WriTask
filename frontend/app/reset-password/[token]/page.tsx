@@ -9,6 +9,7 @@ import {
   LockHeaderIcon,
 } from "@/components/auth/icons";
 import "../../login/login.css";
+import { passwordPolicyError } from "@/lib/passwordPolicy";
 
 export default function ResetPasswordPage() {
   const { token } = useParams<{ token: string }>();
@@ -26,8 +27,9 @@ export default function ResetPasswordPage() {
     e.preventDefault();
     setError(""); setMessage("");
 
-    if (password.length < 6) {
-      setError("Password must be at least 6 characters.");
+    const weakPassword = passwordPolicyError(password);
+    if (weakPassword) {
+      setError(weakPassword);
       return;
     }
     if (password !== confirmPassword) {

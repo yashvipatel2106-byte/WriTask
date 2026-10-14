@@ -17,6 +17,7 @@ import Logo from "@/components/ui/Logo";
 import { writeStoredOrgId, clearStoredProjectId } from "@/lib/orgStorage";
 import { getEmailValidationError } from "@/lib/validation/email";
 import { toast } from "@/components/ui/toast";
+import { passwordPolicyError } from "@/lib/passwordPolicy";
 import "../login/login.css";
 
 const WIZARD_PW_KEY = "writaskWizardPw";
@@ -88,8 +89,13 @@ function SignupPageInner() {
       setError(emailErr);
       return;
     }
-    if (!username.trim() || password.length < 6) {
-      setError("Username, email, and a password (6+ characters) are required.");
+    if (!username.trim() || !password) {
+      setError("Username, email, and password are required.");
+      return;
+    }
+    const weakPassword = passwordPolicyError(password);
+    if (weakPassword) {
+      setError(weakPassword);
       return;
     }
 
@@ -303,13 +309,13 @@ function SignupPageInner() {
                   <input
                     id="signup-pw"
                     type={showPw ? "text" : "password"}
-                    placeholder="At least 6 characters"
+                    placeholder="At least 8 characters, with a letter and a number"
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
                     autoComplete="new-password"
                     suppressHydrationWarning
                     required
-                    minLength={6}
+                    minLength={8}
                   />
                   <button
                     type="button"

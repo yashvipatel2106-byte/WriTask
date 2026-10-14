@@ -48,3 +48,8 @@ next-env.d.ts
 
 # User-uploaded task attachments (created at runtime)
 /uploads/
+
+!.env.example
+
+# runtime import/export artifacts
+temp/imports/

@@ -1,6 +1,7 @@
 const User = require("../models/user");
 const Organization = require("../models/Organization");
 const jwt = require("jsonwebtoken");
+const { passwordPolicyError } = require("../utils/passwordPolicy");
 const {
   verifyOrgMembershipPassword,
   verifyPersonalPassword,
@@ -54,10 +55,9 @@ exports.changePassword = async (req, res) => {
     const current = String(currentPassword).trim();
     const next = String(newPassword).trim();
 
-    if (next.length < 6) {
-      return res.status(400).json({
-        message: "New password must be at least 6 characters",
-      });
+    const weakPassword = passwordPolicyError(next);
+    if (weakPassword) {
+      return res.status(400).json({ message: weakPassword });
     }
 
     const user = await User.findById(req.user._id);
@@ -135,10 +135,9 @@ exports.changePassword = async (req, res) => {
 exports.setInitialPassword = async (req, res) => {
   try {
     const { password } = req.body;
-    if (!password || String(password).trim().length < 6) {
-      return res.status(400).json({
-        message: "Password must be at least 6 characters",
-      });
+    const weakPassword = passwordPolicyError(password);
+    if (weakPassword) {
+      return res.status(400).json({ message: weakPassword });
     }
 
     const plain = String(password).trim();

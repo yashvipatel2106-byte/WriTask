@@ -25,7 +25,25 @@ const {
     activeSessions,
 } = require("../metrics/authMetrics");
 
+const { passwordPolicyError } = require("../utils/passwordPolicy");
+
 const INVALID_CREDENTIALS = "Invalid user ID or password";
+const MAX_OTP_ATTEMPTS = 5;
+
+// 6-digit OTP from a CSPRNG; only its SHA-256 hash is stored.
+function generateOtp() {
+  return crypto.randomInt(100000, 1000000).toString();
+}
+
+function sha256(value) {
+  return crypto.createHash("sha256").update(String(value)).digest("hex");
+}
+
+function safeEqualHex(a, b) {
+  const bufA = Buffer.from(String(a), "hex");
+  const bufB = Buffer.from(String(b), "hex");
+  return bufA.length === bufB.length && crypto.timingSafeEqual(bufA, bufB);
+}
 
 function signAuthToken(userId, organizationId = null) {
   const payload = { id: userId };
@@ -134,6 +152,11 @@ exports.signup = async (req, res) => {
       });
     }
 
+    const weakSignupPassword = passwordPolicyError(password);
+    if (weakSignupPassword) {
+      return res.status(400).json({ message: weakSignupPassword });
+    }
+
     const existingUser =
       await User.findOne({ email });
 
@@ -145,12 +168,10 @@ exports.signup = async (req, res) => {
         });
       }
 
-      const otp = Math.floor(
-        100000 +
-          Math.random() * 900000
-      ).toString();
+      const otp = generateOtp();
 
-      existingUser.otp = otp;
+      existingUser.otp = sha256(otp);
+      existingUser.otpAttempts = 0;
       existingUser.otpExpiry =
         new Date(
           Date.now() +
@@ -180,10 +201,7 @@ exports.signup = async (req, res) => {
         10
       );
 
-    const otp = Math.floor(
-      100000 +
-        Math.random() * 900000
-    ).toString();
+    const otp = generateOtp();
 
     const otpExpiry = new Date(
       Date.now() +
@@ -194,7 +212,7 @@ exports.signup = async (req, res) => {
       username,
       email,
       password: hashedPassword,
-      otp,
+      otp: sha256(otp),
       otpExpiry,
       verified: false,
     });
@@ -245,10 +263,11 @@ exports.verifyOTP = async (
         email,
       });
 
-    if (!user) {
-      return res.status(404).json({
+    if (!user || typeof otp === "undefined" || otp === null) {
+      // Same answer as a wrong code so accounts cannot be enumerated.
+      return res.status(400).json({
         message:
-          "User not found.",
+          "Invalid OTP.",
       });
     }
 
@@ -271,10 +290,23 @@ exports.verifyOTP = async (
     }
 
     if (
-      user.otp !==
-      otp.toString()
+      !user.otp ||
+      !safeEqualHex(user.otp, sha256(otp))
     ) {
       otpFailures.inc();
+      user.otpAttempts = (user.otpAttempts || 0) + 1;
+      if (user.otpAttempts >= MAX_OTP_ATTEMPTS) {
+        // Too many wrong guesses: invalidate the code, a new one must be requested.
+        user.otp = null;
+        user.otpExpiry = null;
+        user.otpAttempts = 0;
+        await user.save();
+        return res.status(429).json({
+          message:
+            "Too many incorrect attempts. Please request a new OTP.",
+        });
+      }
+      await user.save();
       return res.status(400).json({
         message:
           "Invalid OTP.",
@@ -284,6 +316,7 @@ exports.verifyOTP = async (
     user.verified = true;
     user.otp = null;
     user.otpExpiry = null;
+    user.otpAttempts = 0;
 
     await user.save();
 
@@ -428,9 +461,7 @@ exports.googleLogin = async (req, res) => {
       // Google Sign-In needs no password, but we still give the account a
       // real one so the same person can also log in the normal email/password
       // way later — mailed to them once, hashed before it ever touches the DB.
-      const tempPassword = Math.floor(
-        100000 + Math.random() * 900000
-      ).toString();
+      const tempPassword = generateOtp();
       const hashedPassword = await bcrypt.hash(tempPassword, 10);
 
       user = await User.create({
@@ -485,12 +516,12 @@ exports.forgotPassword =
         });
 
       if (!user) {
-        return res
-          .status(404)
-          .json({
-            message:
-              "User not found",
-          });
+        // Same shape as the success response so accounts cannot be enumerated.
+        return res.json({
+          message: "Password reset email sent",
+          organizationId: null,
+          organizationName: null,
+        });
       }
 
       const targetOrg = await resolvePasswordResetOrganization(
@@ -505,8 +536,9 @@ exports.forgotPassword =
             "hex"
           );
 
+      // Only the hash is stored; the raw token is only in the emailed link.
       user.resetToken =
-        token;
+        sha256(token);
 
       user.resetTokenExpiry =
         Date.now() +
@@ -563,16 +595,15 @@ exports.resetPassword =
         password,
       } = req.body;
 
-      if (!password || String(password).length < 6) {
-        return res.status(400).json({
-          message: "Password must be at least 6 characters",
-        });
+      const weakPassword = passwordPolicyError(password);
+      if (weakPassword) {
+        return res.status(400).json({ message: weakPassword });
       }
 
       const user =
         await User.findOne({
           resetToken:
-            token,
+            sha256(token || ""),
           resetTokenExpiry:
             {
               $gt:

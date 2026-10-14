@@ -1,5 +1,6 @@
 const crypto = require("crypto");
 const fs = require("fs");
+const { passwordPolicyError } = require("../utils/passwordPolicy");
 
 // Invitation tokens are stored only as this hash (never the raw value); the
 // raw token lives only in the emailed URL and in the API request/response
@@ -513,10 +514,9 @@ const acceptInvitation = async (req, res) => {
       return res.status(400).json({ message: "Invitation token is required" });
     }
 
-    if (!password || String(password).trim().length < 6) {
-      return res.status(400).json({
-        message: "A password of at least 6 characters is required for this organization.",
-      });
+    const weakPassword = passwordPolicyError(password);
+    if (weakPassword) {
+      return res.status(400).json({ message: weakPassword });
     }
 
     const invitation = await OrganizationInvitation.findOne({

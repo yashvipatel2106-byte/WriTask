@@ -18,7 +18,9 @@ const auth = async (req, res, next) => {
       process.env.JWT_SECRET
     );
 
-    const user = await User.findById(decoded.id);
+    const user = await User.findById(decoded.id).select(
+      "-otp -otpExpiry -otpAttempts -resetToken -resetTokenExpiry"
+    );
 
     if (!user) {
       return res.status(401).json({

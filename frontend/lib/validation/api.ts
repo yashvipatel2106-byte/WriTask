@@ -6,8 +6,17 @@
  * so other devices don't hit their own localhost.
  */
 export function getApiBaseUrl(): string {
+  // Only NEXT_PUBLIC_* vars are inlined into the browser bundle. API_URL is
+  // kept as a server-side / legacy fallback. In production with neither set,
+  // use same-origin "/api" instead of silently calling localhost.
+  const devFallback =
+    process.env.NODE_ENV === "production"
+      ? "/api"
+      : "http://localhost:5000/api";
   let base =
-    process.env.API_URL?.trim() || "http://localhost:5000/api";
+    process.env.API_URL?.trim() ||
+    process.env.API_URL?.trim() ||
+    devFallback;
 
   if (typeof window !== "undefined") {
     const match = window.location.hostname.match(

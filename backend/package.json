@@ -1,5 +1,5 @@
 {
-  "name": "login-backend",
+  "name": "writask-backend",
   "private": true,
   "type": "commonjs",
   "engines": {
@@ -28,8 +28,10 @@
     "dayjs": "^1.11.21",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
+    "express-rate-limit": "^8.7.1",
     "google-auth-library": "^10.9.0",
     "handlebars": "^4.7.9",
+    "helmet": "^8.3.0",
     "ioredis": "^5.11.1",
     "jsonwebtoken": "^9.0.3",
     "mongoose": "^9.6.3",
